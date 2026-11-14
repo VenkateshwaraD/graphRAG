@@ -8,7 +8,7 @@
 - Seed: `.venv/bin/python scripts/seed.py --api http://localhost:8000`
 - Graph index: `POST /ingest` then poll `GET /ingest/{job_id}`; `?update=true` = incremental merge
 - Eval: `scripts/eval_retrieval.py` (recall+MRR+path accuracy), `scripts/eval_qa.py`, `scripts/eval_benchmark.py` (vector/FTS/hybrid/traverse)
-- Quality gate: `scripts/eval_quality.py` (ruff + pytest; `--with-retrieval` adds recall/coverage floors); CI = `.github/workflows/ci.yml`
+- Quality gate: `scripts/eval_quality.py` (ruff + pytest; `--with-retrieval` adds recall/coverage floors); CI = `.gitlab-ci.yml` (docs/CICD.md)
 
 ## Environment quirks (this machine)
 

@@ -332,4 +332,5 @@ QA 3/3 correct with 3/3 gold citations.
 .venv/bin/python scripts/eval_quality.py   # full local gate
 ```
 
-CI (`.github/workflows/ci.yml`) runs the gate on push/PR.
+CI — GitLab pipeline (`.gitlab-ci.yml`, see [CICD.md](CICD.md)) runs
+the gate on push/MR; `retrieval-eval` is manual/scheduled.

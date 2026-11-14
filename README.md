@@ -154,9 +154,10 @@ when `API_KEY` is configured (unset → auth disabled for local dev).
 .venv/bin/python scripts/eval_quality.py       # CI gate: ruff + pytest (+ --with-retrieval floors)
 ```
 
-CI runs `scripts/eval_quality.py` (see `.github/workflows/ci.yml`).
-`--with-retrieval` additionally enforces recall/coverage floors and is
-meant for a seeded environment — the offline suite can't build an index.
+CI runs `scripts/eval_quality.py` via **GitLab CI** (`.gitlab-ci.yml`;
+details in [docs/CICD.md](docs/CICD.md)). `--with-retrieval`
+additionally enforces recall/coverage floors and is meant for a seeded
+environment — the offline suite can't build an index.
 
 ## Tests
 

@@ -1,0 +1,37 @@
+# GitLab CI/CD — quality gate for the GraphRAG assistant.
+#
+# One enforced stage: lint + offline test suite via scripts/eval_quality.py.
+# The retrieval-eval leg needs a built GraphRAG index + real embeddings,
+# so it runs as a manual job (or on schedules) against a seeded runner
+# with GRAPHRAG_ROOT/LLM_* configured — never as a blocking step.
+
+stages:
+  - test
+
+default:
+  image: python:3.12
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/pip install -U pip
+    - .venv/bin/pip install -e ".[dev]"
+
+quality-gate:
+  stage: test
+  script:
+    - .venv/bin/python scripts/eval_quality.py
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"
+
+# Manual / scheduled deep gate — needs seeded data + live LLM+embedding
+# config on the runner (see docs/CICD.md).
+retrieval-eval:
+  stage: test
+  script:
+    - .venv/bin/python scripts/eval_quality.py --with-retrieval
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
