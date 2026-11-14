@@ -1,0 +1,15 @@
+Course Catalog — College of Engineering
+
+CS-501 Advanced Database Systems is a graduate course offered by the
+Department of Computer Science. The course is taught by Dr. Priya Raman.
+Prerequisite for CS-501 is CS-301 Data Structures.
+
+CS-301 Data Structures is an undergraduate course taught by
+Dr. Alan Osei in the Department of Computer Science.
+
+ME-210 Thermodynamics is taught by Dr. Lucia Ferreira in the Department
+of Mechanical Engineering. ME-210 is a required course for the
+Energy Systems Certificate.
+
+The Energy Systems Certificate is administered by the Sustainability
+Programs Office.

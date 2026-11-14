@@ -1,0 +1,15 @@
+Faculty Directory
+
+Dr. Priya Raman is a Professor in the Department of Computer Science.
+She directs the Data Systems Research Lab and serves on the Graduate
+Admissions Committee for the College of Engineering.
+
+Dr. Alan Osei is a Senior Lecturer in the Department of Computer Science.
+He is the faculty advisor for the Undergraduate Programming Club.
+
+Dr. Lucia Ferreira is an Associate Professor in the Department of
+Mechanical Engineering. She chairs the Sustainability Programs Office,
+which oversees the Energy Systems Certificate.
+
+The Department of Computer Science is housed in Turing Hall on North
+Campus. The Department of Mechanical Engineering is in Maxwell Hall.
