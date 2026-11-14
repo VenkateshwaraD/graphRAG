@@ -72,3 +72,21 @@ call 4 local  -> route=local   (path no longer decays)
 - Deleting a doc removes chunks/staged input, but graph entities persist
   until the next /ingest rebuild.
 ```
+
+## UI screenshots (headless Chrome + Playwright)
+```
+evidence/screenshots/00_api_docs.png        - Swagger UI, all endpoints
+evidence/screenshots/01_ui_chat.png         - Chat page, clean render
+evidence/screenshots/02_ui_documents.png    - Documents page + doc list
+evidence/screenshots/03_ui_graph_index.png  - Graph stats + job history
+evidence/screenshots/05_ui_chat_answer.png  - Multi-hop Q&A + citations
+```
+
+## Screenshot review findings
+```
+1. seed.py run twice -> duplicate campus.txt document (seed not
+   idempotent; cosmetic, retrieval unaffected)
+2. citations [1]+[2] same doc (different text units) - expected
+3. past failed jobs (pre-fix bugs) recorded with real errors - OK
+4. testfile.bin shows status=failed correctly - OK
+```
