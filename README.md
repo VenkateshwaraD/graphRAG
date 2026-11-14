@@ -16,8 +16,8 @@ Streamlit UI ──> FastAPI ──> LangGraph workflow
           ┌──────────┬──────────┼──────────┐
           v          v          v          v
        traverse   local      global     hybrid
-       k-hop BFS  GraphRAG   GraphRAG   LanceDB
-       over graph Local      Global     vector+FTS (RRF)
+       best-first GraphRAG   GraphRAG   LanceDB
+       multi-path Local      Global     vector+FTS (RRF)
           └──────────┴──────────┴──────────┘
                     generate / cited answer
 
@@ -27,8 +27,14 @@ Ingestion: upload → extract (pdf/docx/txt/md) → chunk → embed
              GraphRAG indexing → parquet artifacts + LanceDB
 ```
 
-- **traverse** — deterministic k-hop BFS over the extracted knowledge
-  graph; hops are auditable (citations carry the entity path).
+- **traverse** — guided multi-hop over the extracted knowledge graph:
+  the router LLM decomposes the question into entity anchors, anchors
+  seed a best-first expansion keeping several scored candidate paths
+  per node (edge weight × description relevance, decayed by depth),
+  and expansion stops early once enough evidence is found — depth is
+  derived from the question, capped by `TRAVERSE_K_HOPS`. Hops are
+  auditable: citations carry the entity path and relationship
+  directions.
 - **local** — GraphRAG LocalSearch: entity-anchored neighborhoods.
 - **global** — GraphRAG GlobalSearch: map-reduce over community reports.
 - **hybrid** — chunk-level vector similarity + full-text search, RRF-merged.
@@ -68,7 +74,9 @@ external DB needed.
 | `EMBEDDING_PROVIDER` | `sentence_transformers` | `sentence_transformers` \| `openai` \| `voyage` \| `hash` (tests) |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | shared by indexing AND query paths |
 | `EMBEDDING_DIMS` | 384 | must match model; also sets GraphRAG `vector_size` |
-| `TRAVERSE_K_HOPS` | 2 | BFS depth for multi-hop |
+| `TRAVERSE_K_HOPS` | 2 | max hop depth cap for traverse (depth adapts to the question) |
+| `API_KEY` | — | `X-API-Key` required on all routes except `/healthz`+`/readyz`; unset = auth off |
+| `MAX_UPLOAD_BYTES` | 25 MB | upload size cap → `413` when exceeded |
 | `GRAPHRAG_COMMUNITY_LEVEL` | 0 | community level for global search |
 | `GRAPHRAG_MAX_GLEANINGS` | 1 | entity-extraction passes |
 
@@ -90,6 +98,9 @@ GraphRAG's entity embeddings use the same provider via a custom
 `local_st` type registered into `graphrag_llm`.
 
 ## API
+
+All routes except `/healthz`/`/readyz` require `X-API-Key: $API_KEY`
+when `API_KEY` is configured (unset → auth disabled for local dev).
 
 | Route | Purpose |
 |---|---|
@@ -125,3 +136,9 @@ GraphRAG's entity embeddings use the same provider via a custom
   Leiden — small corpora produce only level 0.
 - This build dropped the original multi-tenant/permission-aware
   requirements by decision — see git history / plan docs.
+- Auth is a shared `X-API-Key`, not per-user identity — there is no
+  authorization layer beyond "has the key".
+- `POST /ingest` allows one live job (atomic in-process); a
+  multi-worker deployment would need DB-level coordination.
+- `POST /ingest` keeps the previous graph output until the new build
+  succeeds — a failed reindex restores it automatically.

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Conversation, Document, Message
 from app.ingestion.embed import EmbeddingProvider
 from app.rag.llm import LLMProvider
-from app.rag.prompts import ANSWER_SYSTEM, INSUFFICIENT_CONTEXT
+from app.rag.prompts import ANSWER_SYSTEM, ASSESS_SYSTEM, INSUFFICIENT_CONTEXT
 from app.rag.router import route_question
 from app.retrieval.artifacts import load_artifacts
 from app.retrieval.vectorstore import LanceChunkStore, RetrievedChunk
@@ -98,8 +98,9 @@ def build_rag_graph(
 
             try:
                 chunks = traverse(
-                    state["question"], artifacts, embedder, k_hops=k_hops,
-                    max_items=state["k"],
+                    state["question"], artifacts, embedder,
+                    max_hops=k_hops, max_items=state["k"],
+                    router_llm=router_llm,
                 )
             except Exception:
                 logger.exception("traverse failed; falling back to hybrid")
@@ -136,31 +137,89 @@ def build_rag_graph(
         return {"error": f"unknown route {route}"}
 
     async def assess_node(state: RAGState) -> dict:
-        """Empty traverse -> retry at K+1 hops once, then fall back to hybrid.
+        """Quality gate: retry when retrieval failed OR returned irrelevant
+        chunks — never more than once.
 
-        Skips entirely when a route errored, the engine already answered,
-        or a fallback already ran (``expanded`` prevents re-loops).
+        Empty traverse -> hybrid fallback; empty hybrid -> traverse once
+        when a graph index exists. Non-empty chunks get one cheap
+        router-LLM relevance verdict; a "no" triggers a single
+        alternate-retriever attempt. Skips entirely when a route errored,
+        the engine already answered, or a fallback already ran
+        (``expanded`` prevents re-loops). Traversal depth is decided
+        inside ``traverse`` — this node does not deepen hops.
 
         Author: venkateshwara doijode
         """
         if state.get("error") or state.get("answer") or state.get("expanded"):
             return {}
-        if state["route"] != "traverse" or state.get("chunks"):
+        route = state["route"]
+        chunks = state.get("chunks") or []
+
+        def _hybrid() -> list[RetrievedChunk]:
+            from app.retrieval.hybrid import HybridRetriever
+
+            return HybridRetriever(store, embedder).retrieve(
+                state["question"], k=state["k"]
+            )
+
+        def _traverse() -> list[RetrievedChunk]:
+            from app.retrieval.traverse import traverse
+
+            return traverse(
+                state["question"], load_artifacts(), embedder,
+                max_hops=k_hops, max_items=state["k"], router_llm=router_llm,
+            )
+
+        if not chunks:
+            if route == "traverse":
+                return {"route": "hybrid", "chunks": _hybrid(), "expanded": True}
+            if load_artifacts().indexed:
+                t_chunks = _traverse()
+                if t_chunks:
+                    return {
+                        "route": "traverse",
+                        "chunks": t_chunks,
+                        "expanded": True,
+                    }
             return {}
-        from app.retrieval.traverse import traverse
 
-        chunks = traverse(
-            state["question"], load_artifacts(), embedder,
-            k_hops=k_hops + 1, max_items=state["k"],
-        )
-        if chunks:
-            return {"chunks": chunks, "expanded": True}
-        from app.retrieval.hybrid import HybridRetriever
-
-        chunks = HybridRetriever(store, embedder).retrieve(
-            state["question"], k=state["k"]
-        )
-        return {"route": "hybrid", "chunks": chunks, "expanded": True}
+        preview = "\n".join(f"- {c.text[:200]}" for c in chunks[:4])
+        try:
+            verdict = router_llm.generate(
+                [
+                    {"role": "system", "content": ASSESS_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Question: {state['question']}\n"
+                            f"Snippets:\n{preview}\n"
+                            "Can these snippets answer the question?"
+                        ),
+                    },
+                ],
+                max_tokens=4,
+            ).strip().lower()
+        except Exception:
+            return {}
+        if not verdict.startswith("no"):
+            return {}
+        if route == "traverse":
+            alt_chunks = _hybrid()
+            if alt_chunks:
+                return {
+                    "route": "hybrid",
+                    "chunks": alt_chunks,
+                    "expanded": True,
+                }
+        elif load_artifacts().indexed:
+            alt_chunks = _traverse()
+            if alt_chunks:
+                return {
+                    "route": "traverse",
+                    "chunks": alt_chunks,
+                    "expanded": True,
+                }
+        return {}
 
     async def generate_node(state: RAGState) -> dict:
         """Synthesize the final grounded answer + numbered citations.

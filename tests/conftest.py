@@ -14,6 +14,8 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP}/app.db")
 os.environ.setdefault("LANCEDB_URI", f"{_TMP}/lancedb")
 os.environ.setdefault("UPLOAD_DIR", f"{_TMP}/uploads")
 os.environ.setdefault("GRAPHRAG_ROOT", f"{_TMP}/graphrag")
+os.environ.setdefault("API_KEY", "test-api-key")
+TEST_API_KEY = "test-api-key"
 
 import pytest  # noqa: E402
 
@@ -45,4 +47,5 @@ def client():
     from app.main import app
 
     with TestClient(app) as c:
+        c.headers["X-API-Key"] = TEST_API_KEY
         yield c

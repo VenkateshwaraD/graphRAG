@@ -26,9 +26,16 @@ def upload(
 
     Author: venkateshwara doijode
     """
-    data = file.file.read()
+    from app.config import get_settings
+
+    max_bytes = get_settings().max_upload_bytes
+    data = file.file.read(max_bytes + 1)
     if not data:
         raise HTTPException(400, "empty file")
+    if len(data) > max_bytes:
+        raise HTTPException(
+            413, f"file exceeds max upload size of {max_bytes} bytes"
+        )
     path = save_upload(file.filename or "upload", data)
     doc = Document(
         title=title or file.filename or path.name,

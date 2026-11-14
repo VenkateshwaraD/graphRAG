@@ -65,9 +65,37 @@ def _read(out_dir: Path, name: str) -> pd.DataFrame:
     return pd.read_parquet(f) if f.exists() else pd.DataFrame()
 
 
-@lru_cache(maxsize=1)
-def _cached(out_dir_str: str) -> GraphArtifacts:
-    """Load all artifact frames once (parquets are ~immutable per build).
+_ARTIFACT_NAMES = (
+    "entities",
+    "relationships",
+    "text_units",
+    "communities",
+    "community_reports",
+    "documents",
+)
+
+
+def _signature(out_dir: Path) -> int:
+    """Fingerprint of the current build on disk: max parquet mtime_ns.
+
+    Cheap to compute per call, so the cache auto-invalidates when an
+    index is rebuilt — including by another process — without callers
+    remembering to pass ``refresh``.
+
+    Author: venkateshwara doijode
+    """
+    newest = 0
+    for name in _ARTIFACT_NAMES:
+        try:
+            newest = max(newest, (out_dir / f"{name}.parquet").stat().st_mtime_ns)
+        except FileNotFoundError:
+            pass
+    return newest
+
+
+@lru_cache(maxsize=4)
+def _cached(out_dir_str: str, signature: int) -> GraphArtifacts:
+    """Load all artifact frames once per build signature.
 
     Author: venkateshwara doijode
     """
@@ -84,11 +112,14 @@ def _cached(out_dir_str: str) -> GraphArtifacts:
 
 
 def load_artifacts(refresh: bool = False) -> GraphArtifacts:
-    """Return the cached artifact set; ``refresh=True`` reloads after a
-    new index job finished.
+    """Return the artifact set for the current on-disk build.
+
+    ``refresh=True`` still forces a reload; it is no longer required
+    after reindexing because the mtime signature changes with the build.
 
     Author: venkateshwara doijode
     """
     if refresh:
         _cached.cache_clear()
-    return _cached(str(artifacts_dir()))
+    out_dir = artifacts_dir()
+    return _cached(str(out_dir), _signature(out_dir))

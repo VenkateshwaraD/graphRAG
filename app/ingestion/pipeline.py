@@ -25,26 +25,27 @@ logger = logging.getLogger(__name__)
 def process_document(session: Session, document: Document) -> int:
     """Extract, chunk, embed and persist one uploaded document.
 
-    Steps: extract text (fail when nothing extractable) -> stage a
-    ``{doc_id}.txt`` into the GraphRAG input dir -> chunk -> embed with
-    the shared provider -> replace any previous chunks in both stores ->
-    mark the document ``chunked``. Any exception rolls back the session,
-    marks the document ``failed`` with the error, and returns 0.
+    Steps: extract text (fail when nothing extractable) -> chunk -> embed
+    with the shared provider -> replace any previous chunks in both
+    stores -> stage a ``{doc_id}.txt`` into the GraphRAG input dir ->
+    mark the document ``chunked``. Embeddings are computed before any
+    store is mutated so failures up to that point are side-effect free;
+    on later failure the rollback also clears partial LanceDB rows and
+    the staged input file.
 
     Author: venkateshwara doijode
     """
     settings = get_settings()
     path = Path(document.storage_path)
+    staged = settings.graphrag_root / "input" / f"{document.id}.txt"
+    store = get_vector_store()
     try:
         text = extract_text(path)
         if not text.strip():
             raise ValueError("no extractable text")
 
-        # Stage for GraphRAG indexing (input dir is plain text files).
-        rag_input = settings.graphrag_root / "input"
-        rag_input.mkdir(parents=True, exist_ok=True)
-        (rag_input / f"{document.id}.txt").write_text(text, encoding="utf-8")
-
+        # Compute everything before mutating any store — a failure above
+        # this line leaves the previous index state fully intact.
         pieces = chunk_text(text)
         embedder = get_embedding_provider()
         vectors = embedder.embed_documents(pieces)
@@ -52,7 +53,6 @@ def process_document(session: Session, document: Document) -> int:
         session.query(DocumentChunk).filter(
             DocumentChunk.document_id == document.id
         ).delete()
-        store = get_vector_store()
         store.delete_document(document.id)
 
         rows = []
@@ -77,6 +77,11 @@ def process_document(session: Session, document: Document) -> int:
         store.add_chunks(rows)
         store.ensure_fts_index()
 
+        # Stage for GraphRAG indexing only after the chunk stores
+        # committed, so a failed doc never reaches the graph input dir.
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(text, encoding="utf-8")
+
         document.status = DocStatus.CHUNKED.value
         document.error = None
         session.commit()
@@ -84,6 +89,10 @@ def process_document(session: Session, document: Document) -> int:
     except Exception as exc:
         logger.exception("ingestion failed for document %s", document.id)
         session.rollback()
+        # Undo non-transactional side effects: partial LanceDB writes and
+        # any staged GraphRAG input file.
+        store.delete_document(document.id)
+        staged.unlink(missing_ok=True)
         document.status = DocStatus.FAILED.value
         document.error = str(exc)[:1000]
         session.commit()

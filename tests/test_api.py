@@ -64,3 +64,42 @@ def test_missing_source(client):
     Author: venkateshwara doijode
     """
     assert client.get("/sources/nope").status_code == 404
+
+
+def test_auth_required(client):
+    """Protected routes 401 without / with a wrong API key.
+
+    Author: venkateshwara doijode
+    """
+    r = client.get("/documents", headers={"X-API-Key": "wrong"})
+    assert r.status_code == 401
+    r = client.post("/chat", json={"question": "hi"}, headers={"X-API-Key": ""})
+    assert r.status_code == 401
+
+
+def test_health_open_without_key(client):
+    """Probes stay unauthenticated so monitors don't need the key.
+
+    Author: venkateshwara doijode
+    """
+    del client.headers["X-API-Key"]
+    try:
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/documents").status_code == 401
+    finally:
+        client.headers["X-API-Key"] = "test-api-key"
+
+
+def test_upload_size_limit(client, monkeypatch):
+    """Uploads beyond MAX_UPLOAD_BYTES -> 413.
+
+    Author: venkateshwara doijode
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "max_upload_bytes", 16)
+    r = client.post(
+        "/documents",
+        files={"file": ("big.txt", b"x" * 64)},
+    )
+    assert r.status_code == 413

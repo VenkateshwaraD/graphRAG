@@ -48,3 +48,22 @@ def test_default_fallback():
     """
     llm = FakeLLM(canned="unparseable nonsense")
     assert route_question("q", llm) == "hybrid"
+
+
+def test_first_token_by_position_wins():
+    """When several route tokens appear, the earliest wins —
+    deterministic regardless of set iteration order.
+
+    Author: venkateshwara doijode
+    """
+    llm = FakeLLM(canned="use traverse, not local search")
+    assert route_question("q", llm) == "traverse"
+
+
+def test_word_boundary_blocks_substring():
+    """'globalization' must not parse as the 'global' route.
+
+    Author: venkateshwara doijode
+    """
+    llm = FakeLLM(canned="globalization effects")
+    assert route_question("q", llm) == "hybrid"

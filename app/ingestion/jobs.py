@@ -27,6 +27,38 @@ def create_job(session: Session) -> IngestionJob:
     return job
 
 
+_reserve_lock = threading.Lock()
+
+
+def try_reserve_job(session: Session) -> IngestionJob | None:
+    """Atomically check for a live job and launch a new one if free.
+
+    The check-then-create runs under a process-wide lock so two
+    concurrent POST /ingest requests can't both see "no running job" and
+    launch parallel builds over the shared output dir. Returns None when
+    a job is already pending/running (caller maps to 409). Guards only
+    within this process — a multi-worker deployment would need a
+    DB-level unique constraint instead.
+
+    Author: venkateshwara doijode
+    """
+    with _reserve_lock:
+        running = (
+            session.query(IngestionJob)
+            .filter(
+                IngestionJob.status.in_(
+                    [JobStatus.PENDING.value, JobStatus.RUNNING.value]
+                )
+            )
+            .first()
+        )
+        if running:
+            return None
+        job = create_job(session)
+        launch_index_job(job.id)
+        return job
+
+
 def _set(session: Session, job_id: str, **fields) -> None:
     """Update fields on a job row; no-op when the row is gone.
 

@@ -70,6 +70,7 @@ def main() -> None:
 
     for name in ("hybrid", "traverse"):
         hits_total = 0
+        cov_total = 0.0
         rr_total = 0.0
         for q, gold in LABELED:
             if name == "hybrid":
@@ -79,19 +80,26 @@ def main() -> None:
                     print("traverse: no graph index — skipped (run /ingest first)")
                     break
                 results = traverse(q, artifacts, embedder,
-                                   k_hops=get_settings().traverse_k_hops,
+                                   max_hops=get_settings().traverse_k_hops,
                                    max_items=args.k)
             retrieved = {stems.get(r.document_id) for r in results}
-            hit = bool(set(gold) & retrieved)
+            # a hit requires the FULL gold evidence set — retrieving 1
+            # of 3 needed docs must not count as success
+            hit = set(gold) <= retrieved
+            coverage = len(set(gold) & retrieved) / len(gold)
             hits_total += hit
+            cov_total += coverage
             rank = next(
                 (i + 1 for i, r in enumerate(results) if stems.get(r.document_id) in gold),
                 0,
             )
             rr_total += 1.0 / rank if rank else 0.0
-            print(f"  [{name}] hit={hit} q={q[:60]!r} got={sorted(retrieved)}")
+            print(f"  [{name}] hit={hit} cov={coverage:.2f} q={q[:60]!r} got={sorted(retrieved)}")
         n = len(LABELED)
-        print(f"{name}: recall@{args.k}={hits_total/n:.2f}  MRR={rr_total/n:.2f}")
+        print(
+            f"{name}: recall@{args.k}={hits_total/n:.2f}  "
+            f"gold_coverage={cov_total/n:.2f}  MRR={rr_total/n:.2f}"
+        )
 
     session.close()
 

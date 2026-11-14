@@ -4,6 +4,7 @@ import requests
 import streamlit as st
 
 API = os.environ.get("API_URL", "http://localhost:8000")
+HEADERS = {"X-API-Key": os.environ["API_KEY"]} if os.environ.get("API_KEY") else {}
 
 st.set_page_config(page_title="University GraphRAG Assistant", layout="wide")
 st.title("University Knowledge Assistant (GraphRAG)")
@@ -20,6 +21,7 @@ if page == "Documents":
                 f"{API}/documents",
                 files={"file": (uploaded.name, uploaded.getvalue())},
                 params={"title": title or uploaded.name},
+                headers=HEADERS,
                 timeout=300,
             )
         if r.ok:
@@ -28,13 +30,13 @@ if page == "Documents":
             st.error(r.text)
 
     st.subheader("Indexed documents")
-    docs = requests.get(f"{API}/documents", timeout=30).json()
+    docs = requests.get(f"{API}/documents", headers=HEADERS, timeout=30).json()
     for d in docs:
         st.write(f"- **{d['title']}** — `{d['status']}` ({d['filename']})")
 
 elif page == "Graph Index":
     st.header("Knowledge graph")
-    stats = requests.get(f"{API}/graph/stats", timeout=30).json()
+    stats = requests.get(f"{API}/graph/stats", headers=HEADERS, timeout=30).json()
     cols = st.columns(6)
     for col, key in zip(
         cols,
@@ -44,13 +46,13 @@ elif page == "Graph Index":
     st.write(f"Indexed: **{stats.get('indexed')}**")
 
     if st.button("Run GraphRAG index"):
-        r = requests.post(f"{API}/ingest", timeout=30)
+        r = requests.post(f"{API}/ingest", headers=HEADERS, timeout=30)
         if r.ok:
             st.info(f"Job {r.json()['id']} started — refresh to see progress")
         else:
             st.error(r.text)
 
-    jobs = requests.get(f"{API}/ingest", timeout=30).json()
+    jobs = requests.get(f"{API}/ingest", headers=HEADERS, timeout=30).json()
     if jobs:
         st.subheader("Jobs")
         for j in jobs[:5]:
@@ -58,7 +60,7 @@ elif page == "Graph Index":
         if jobs[0].get("stats"):
             st.json(jobs[0]["stats"])
 
-    ents = requests.get(f"{API}/graph/entities", params={"limit": 50}, timeout=30).json()
+    ents = requests.get(f"{API}/graph/entities", params={"limit": 50}, headers=HEADERS, timeout=30).json()
     if ents:
         st.subheader("Top entities")
         st.dataframe(ents, use_container_width=True)
@@ -96,6 +98,7 @@ else:
                         "conversation_id": st.session_state.convo,
                         "mode": None if mode == "auto" else mode,
                     },
+                    headers=HEADERS,
                     timeout=600,
                 )
             if r.ok:

@@ -21,15 +21,21 @@ CORPUS = ROOT / "seed_corpus"
 def seed_via_api(api: str) -> None:
     """Upload every seed_corpus/*.txt through a running API's /documents.
 
+    Sends the API_KEY env var as X-API-Key when the server has auth on.
+
     Author: venkateshwara doijode
     """
+    import os
+
     import httpx
 
+    headers = {"X-API-Key": os.environ["API_KEY"]} if os.environ.get("API_KEY") else {}
     for f in sorted(CORPUS.glob("*.txt")):
         r = httpx.post(
             f"{api}/documents",
             files={"file": (f.name, f.read_bytes())},
             params={"title": f.stem},
+            headers=headers,
             timeout=300,
         )
         print(f.name, "->", r.status_code, r.json().get("status") if r.is_success else r.text)

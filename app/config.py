@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    # X-API-Key required on every route except health probes.
+    # Empty disables auth (local dev).
+    api_key: str = ""
+    max_upload_bytes: int = 25 * 1024 * 1024
 
     @field_validator("graphrag_root", "lancedb_uri", "upload_dir", mode="after")
     @classmethod

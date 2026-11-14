@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.db.models import IngestionJob, JobStatus
+from app.db.models import IngestionJob
 from app.db.session import get_session
-from app.ingestion.jobs import create_job, launch_index_job
+from app.ingestion.jobs import try_reserve_job
 from app.schemas import JobOut
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
@@ -14,20 +14,15 @@ def trigger_index(session: Session = Depends(get_session)):
     """Kick off a GraphRAG indexing run over all staged input texts.
 
     At most one job may be pending/running — a second request gets 409 so
-    concurrent builds can't corrupt the shared output dir. Returns the
-    job row; poll GET /ingest/{id} for status.
+    concurrent builds can't corrupt the shared output dir. The
+    check-and-launch is atomic in-process (see ``try_reserve_job``).
+    Returns the job row; poll GET /ingest/{id} for status.
 
     Author: venkateshwara doijode
     """
-    running = (
-        session.query(IngestionJob)
-        .filter(IngestionJob.status.in_([JobStatus.PENDING.value, JobStatus.RUNNING.value]))
-        .first()
-    )
-    if running:
-        raise HTTPException(409, f"index job {running.id} already running")
-    job = create_job(session)
-    launch_index_job(job.id)
+    job = try_reserve_job(session)
+    if job is None:
+        raise HTTPException(409, "an index job is already running")
     return job
 
 

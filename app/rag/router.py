@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from app.rag.llm import LLMProvider
 from app.rag.prompts import ROUTER_SYSTEM
 
@@ -33,8 +35,8 @@ def route_question(
         ],
         max_tokens=8,
     ).strip().lower()
-    # tolerate verbose answers — take first matching token
-    for route in VALID_ROUTES:
-        if route in raw:
-            return route
-    return "hybrid"
+    # tolerate verbose answers — first route token by position wins.
+    # A regex alternation (not a set scan) keeps parsing deterministic
+    # when several tokens appear, and \b blocks substring false hits.
+    m = re.search(r"\b(hybrid|traverse|local|global)\b", raw)
+    return m.group(1) if m else "hybrid"

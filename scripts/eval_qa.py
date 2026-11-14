@@ -37,24 +37,31 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://localhost:8000")
     args = ap.parse_args()
+    import os
+
     import httpx
 
-    correct = cited = 0
+    headers = {"X-API-Key": os.environ["API_KEY"]} if os.environ.get("API_KEY") else {}
+    correct = cited = any_cited = 0
     for q, expected, gold in QA:
-        r = httpx.post(f"{args.api}/chat", json={"question": q}, timeout=600)
+        r = httpx.post(f"{args.api}/chat", json={"question": q}, timeout=600, headers=headers)
         if not r.is_success:
             print(f"FAIL http {r.status_code}: {q[:60]}")
             continue
         data = r.json()
         ok = expected in data["answer"].lower()
         cited_docs = {Path(c.get("document_title") or "").stem for c in data["citations"]}
-        has_cite = bool(cited_docs & set(gold)) or bool(data["citations"])
+        # cite_ok requires a citation from a GOLD document — merely
+        # returning any citation must not count (false-positive fix).
+        has_cite = bool(cited_docs & set(gold))
+        any_cite = bool(data["citations"])
         correct += ok
         cited += has_cite
-        print(f"[{data['route']}] answer_ok={ok} cite_ok={has_cite} :: {q[:70]}")
+        any_cited += any_cite
+        print(f"[{data['route']}] answer_ok={ok} cite_ok={has_cite} any_cite={any_cite} :: {q[:70]}")
         print(f"    -> {data['answer'][:200]}")
     n = len(QA)
-    print(f"answer correctness: {correct}/{n}  citations present: {cited}/{n}")
+    print(f"answer correctness: {correct}/{n}  gold citations: {cited}/{n}  any citations: {any_cited}/{n}")
 
 
 if __name__ == "__main__":

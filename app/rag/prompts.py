@@ -16,4 +16,13 @@ using ONLY the provided context. Cite sources inline as [n] where n is the
 context item number. If the context does not contain enough information to
 answer, say so plainly and do not invent facts."""
 
+DECOMPOSE_SYSTEM = """Break the question into the entities it mentions, in the order a
+multi-hop traversal should visit them (anchor -> intermediate -> target).
+Reply with one entity mention per line, short noun phrases only, no
+numbering, no explanation. If the question is single-hop, reply with just
+the one entity it is about."""
+
+ASSESS_SYSTEM = """You judge whether retrieved snippets can answer the question.
+Reply with exactly one word: yes or no."""
+
 INSUFFICIENT_CONTEXT = "I don't have enough information in the indexed documents to answer that."

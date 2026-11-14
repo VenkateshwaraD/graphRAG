@@ -213,9 +213,10 @@ def register_local_embedding() -> None:
 async def build_graph_index() -> dict:
     """Run the full GraphRAG pipeline over ``GRAPHRAG_ROOT/input``.
 
-    Registers the local embedding type, regenerates settings.yaml, wipes
-    the previous output dir (each job produces a fresh artifact set), then
-    awaits ``graphrag.api.build_index``. Collects per-workflow status plus
+    Registers the local embedding type, regenerates settings.yaml, moves
+    the previous output dir aside (restored if the build fails, so a bad
+    reindex never leaves the system without a graph), then awaits
+    ``graphrag.api.build_index``. Collects per-workflow status plus
     artifact row counts — retrying briefly because the file output storage
     can flush slightly after the pipeline returns. Raises ``RuntimeError``
     listing failed workflows so the job row can record a real error.
@@ -230,13 +231,24 @@ async def build_graph_index() -> dict:
     s = get_settings()
     config = load_config(Path(s.graphrag_root))
 
-    # fresh output per run — artifacts are versioned by job anyway
+    # Keep the previous output until the new build succeeds: rename it
+    # aside rather than deleting, restore it on failure so a crashed
+    # reindex doesn't leave the system with no graph at all.
     out_dir = Path(s.graphrag_root) / "output"
+    prev_dir = Path(s.graphrag_root) / "output.prev"
+    if prev_dir.exists():
+        shutil.rmtree(prev_dir)
     if out_dir.exists():
-        shutil.rmtree(out_dir)
+        out_dir.rename(prev_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    results = await build_index(config=config, verbose=False)
+    try:
+        results = await build_index(config=config, verbose=False)
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        if prev_dir.exists():
+            prev_dir.rename(out_dir)
+        raise
 
     stats: dict[str, Any] = {"workflows": {}}
     for r in results:
@@ -252,7 +264,13 @@ async def build_graph_index() -> dict:
     stats.update(counts)
     errors = [w for w, v in stats["workflows"].items() if v != "done"]
     if errors:
+        # keep the old index — the partial new output is worthless
+        shutil.rmtree(out_dir, ignore_errors=True)
+        if prev_dir.exists():
+            prev_dir.rename(out_dir)
         raise RuntimeError(f"graphrag workflows failed: {errors}")
+    if prev_dir.exists():
+        shutil.rmtree(prev_dir)
     return stats
 
 

@@ -118,19 +118,34 @@ class LanceChunkStore:
             logger.warning("delete failed for document %s", document_id, exc_info=True)
 
     def ensure_fts_index(self) -> None:
-        """(Re)build the Tantivy FTS index over chunk text.
+        """Create the Tantivy FTS index once, then update it incrementally.
 
-        Called after each ingest/reindex; failures are logged since FTS
-        unavailability only degrades (not breaks) hybrid retrieval.
+        A full ``replace=True`` rebuild is O(corpus) — running it after
+        every document ingest made bulk uploads quadratic. Instead the
+        index is created only when missing and ``optimize()`` indexes new
+        rows incrementally. Failures are logged since FTS unavailability
+        only degrades (not breaks) hybrid retrieval.
 
         Author: venkateshwara doijode
         """
         try:
-            self.table.create_index(
-                "text", config=lancedb.index.FTS(with_position=True), replace=True
+            has_fts = any(
+                "fts" in getattr(i, "index_type", "").lower()
+                for i in self.table.list_indices()
             )
         except Exception:
-            logger.warning("FTS index creation failed", exc_info=True)
+            has_fts = False
+        try:
+            if not has_fts:
+                self.table.create_index(
+                    "text",
+                    config=lancedb.index.FTS(with_position=True),
+                    replace=True,
+                )
+            else:
+                self.table.optimize()
+        except Exception:
+            logger.warning("FTS index update failed", exc_info=True)
 
     def vector_search(
         self, embedding: list[float], k: int, embedding_model: str
