@@ -68,6 +68,8 @@ def _settings_yaml() -> str:
         "chunking": {"size": 1200, "overlap": 100},
         "input_storage": {"type": "file", "base_dir": "input"},
         "output_storage": {"type": "file", "base_dir": "output"},
+        # incremental runs stage their delta + previous-index copy here
+        "update_output_storage": {"type": "file", "base_dir": "output.updates"},
         "reporting": {"type": "file", "base_dir": "logs"},
         "cache": {"type": "json", "storage": {"type": "file", "base_dir": "cache"}},
         "vector_store": {
@@ -210,16 +212,36 @@ def register_local_embedding() -> None:
         pass  # already registered
 
 
-async def build_graph_index() -> dict:
-    """Run the full GraphRAG pipeline over ``GRAPHRAG_ROOT/input``.
+def _archive_version(out_dir: Path, root: Path) -> None:
+    """Snapshot the successful output into ``output.versions/<ts>``.
 
-    Registers the local embedding type, regenerates settings.yaml, moves
-    the previous output dir aside (restored if the build fails, so a bad
-    reindex never leaves the system without a graph), then awaits
-    ``graphrag.api.build_index``. Collects per-workflow status plus
-    artifact row counts — retrying briefly because the file output storage
-    can flush slightly after the pipeline returns. Raises ``RuntimeError``
-    listing failed workflows so the job row can record a real error.
+    Keeps the 5 most recent versions so a bad rebuild or update can be
+    rolled back beyond the single ``output.prev`` safety net.
+
+    Author: venkateshwara doijode
+    """
+    import time
+
+    versions = root / "output.versions"
+    versions.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(out_dir, versions / time.strftime("%Y%m%d-%H%M%S"))
+    for old in sorted(versions.iterdir())[:-5]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+async def build_graph_index(update: bool = False) -> dict:
+    """Run the GraphRAG pipeline over ``GRAPHRAG_ROOT/input``.
+
+    ``update=True`` runs an incremental build: GraphRAG diffs the input
+    against the previous index and merges only new/changed content
+    (cheaper than a full rebuild). Falls back to a full build when no
+    previous output exists. For updates the previous output must stay in
+    place — the pipeline reads it during merge — so it's *copied* to
+    ``output.prev`` for rollback instead of renamed. For full builds the
+    output is renamed aside and restored on failure, so a bad reindex
+    never leaves the system without a graph. A successful build is
+    archived to ``output.versions/<ts>``. Raises ``RuntimeError`` listing
+    failed workflows so the job row can record a real error.
 
     Author: venkateshwara doijode
     """
@@ -231,26 +253,30 @@ async def build_graph_index() -> dict:
     s = get_settings()
     config = load_config(Path(s.graphrag_root))
 
-    # Keep the previous output until the new build succeeds: rename it
-    # aside rather than deleting, restore it on failure so a crashed
-    # reindex doesn't leave the system with no graph at all.
     out_dir = Path(s.graphrag_root) / "output"
     prev_dir = Path(s.graphrag_root) / "output.prev"
+    has_previous = out_dir.exists() and any(out_dir.glob("*.parquet"))
+    is_update = update and has_previous
+
     if prev_dir.exists():
         shutil.rmtree(prev_dir)
-    if out_dir.exists():
+    if is_update:
+        # the update pipeline merges INTO output — keep it in place but
+        # snapshot it for rollback
+        shutil.copytree(out_dir, prev_dir)
+    elif out_dir.exists():
         out_dir.rename(prev_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        results = await build_index(config=config, verbose=False)
+        results = await build_index(
+            config=config, verbose=False, is_update_run=is_update
+        )
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
-        if prev_dir.exists():
-            prev_dir.rename(out_dir)
+        _restore(out_dir, prev_dir)
         raise
 
-    stats: dict[str, Any] = {"workflows": {}}
+    stats: dict[str, Any] = {"workflows": {}, "incremental": is_update}
     for r in results:
         stats["workflows"][r.workflow] = (
             "done" if not r.error else f"error: {r.error}"
@@ -265,13 +291,22 @@ async def build_graph_index() -> dict:
     errors = [w for w, v in stats["workflows"].items() if v != "done"]
     if errors:
         # keep the old index — the partial new output is worthless
-        shutil.rmtree(out_dir, ignore_errors=True)
-        if prev_dir.exists():
-            prev_dir.rename(out_dir)
+        _restore(out_dir, prev_dir)
         raise RuntimeError(f"graphrag workflows failed: {errors}")
+    _archive_version(out_dir, Path(s.graphrag_root))
     if prev_dir.exists():
         shutil.rmtree(prev_dir)
     return stats
+
+
+def _restore(out_dir: Path, prev_dir: Path) -> None:
+    """Roll ``output`` back to the pre-build snapshot after a failure.
+
+    Author: venkateshwara doijode
+    """
+    shutil.rmtree(out_dir, ignore_errors=True)
+    if prev_dir.exists():
+        prev_dir.rename(out_dir)
 
 
 def _artifact_stats(out_dir: Path) -> dict:

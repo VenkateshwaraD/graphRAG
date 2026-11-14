@@ -57,19 +57,22 @@ class HybridRetriever:
         self._store = store
         self._embedder = embedder
 
-    def retrieve(self, query: str, k: int = 8) -> list[RetrievedChunk]:
+    def retrieve(
+        self, query: str, k: int = 8, doc_ids: set[str] | None = None
+    ) -> list[RetrievedChunk]:
         """Answer ``query`` with up to ``k`` fused chunks.
 
         Embeds the query with the SAME configured provider used at index
         time (the embedding_model filter then matches), runs vector and
         FTS legs in parallel conceptually, and RRF-merges the results.
+        ``doc_ids`` scopes retrieval to documents the caller may see.
 
         Author: venkateshwara doijode
         """
         # Query embedding via the SAME configured provider as indexing.
         q_vec = self._embedder.embed_query(query)
         vector_hits = self._store.vector_search(
-            q_vec, k=k, embedding_model=self._embedder.model_id
+            q_vec, k=k, embedding_model=self._embedder.model_id, doc_ids=doc_ids
         )
-        fts_hits = self._store.fts_search(query, k=k)
+        fts_hits = self._store.fts_search(query, k=k, doc_ids=doc_ids)
         return _rrf_merge(vector_hits, fts_hits)[:k]

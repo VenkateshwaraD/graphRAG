@@ -60,6 +60,7 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(32), default=DocStatus.UPLOADED.value)
     storage_path: Mapped[str] = mapped_column(String(1024))
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doc_group: Mapped[str] = mapped_column(String(64), default="default")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     chunks: Mapped[list["DocumentChunk"]] = relationship(
@@ -124,6 +125,8 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text)
     citations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     route: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    route_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
@@ -139,6 +142,27 @@ class JobStatus(enum.StrEnum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+
+
+class RelationshipReview(Base):
+    """Human verdict on one extracted relationship.
+
+    Keyed by ``rel_hash`` — a content hash of source+target+description —
+    so verdicts survive GraphRAG rebuilds that mint new relationship ids.
+
+    Author: venkateshwara doijode
+    """
+
+    __tablename__ = "relationship_reviews"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    rel_hash: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(512))
+    target: Mapped[str] = mapped_column(String(512))
+    description: Mapped[str] = mapped_column(Text, default="")
+    verdict: Mapped[str] = mapped_column(String(16))  # approved | rejected
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
 class IngestionJob(Base):

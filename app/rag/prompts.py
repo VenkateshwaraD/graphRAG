@@ -25,4 +25,10 @@ the one entity it is about."""
 ASSESS_SYSTEM = """You judge whether retrieved snippets can answer the question.
 Reply with exactly one word: yes or no."""
 
+VALIDATE_SYSTEM = """You verify grounded answers against their source snippets.
+For each numbered snippet, reply whether it supports claims in the answer:
+'n:yes' or 'n:no', one per line. Then on a final line report any pair of
+snippets that contradict each other as 'conflicts: n vs m' (repeat per
+conflict) or 'conflicts: none'. Nothing else."""
+
 INSUFFICIENT_CONTEXT = "I don't have enough information in the indexed documents to answer that."

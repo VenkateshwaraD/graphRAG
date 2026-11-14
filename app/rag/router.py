@@ -10,10 +10,11 @@ from app.rag.prompts import ROUTER_SYSTEM
 VALID_ROUTES = {"hybrid", "traverse", "local", "global"}
 
 
-def route_question(
+def route_with_reason(
     question: str, router_llm: LLMProvider, override: str | None = None
-) -> str:
-    """Pick the retrieval strategy for ``question``.
+) -> tuple[str, str]:
+    """Pick the retrieval strategy, also returning the router's raw reply
+    as explainability for the choice.
 
     An explicit ``override`` (API ``mode`` param) wins and is validated —
     unknown values raise ``ValueError`` which the API maps to 400.
@@ -27,7 +28,7 @@ def route_question(
     if override:
         if override not in VALID_ROUTES:
             raise ValueError(f"invalid mode {override!r}; expected one of {VALID_ROUTES}")
-        return override
+        return override, f"mode override: {override}"
     raw = router_llm.generate(
         [
             {"role": "system", "content": ROUTER_SYSTEM},
@@ -39,4 +40,15 @@ def route_question(
     # A regex alternation (not a set scan) keeps parsing deterministic
     # when several tokens appear, and \b blocks substring false hits.
     m = re.search(r"\b(hybrid|traverse|local|global)\b", raw)
-    return m.group(1) if m else "hybrid"
+    return (m.group(1), raw) if m else ("hybrid", raw)
+
+
+def route_question(
+    question: str, router_llm: LLMProvider, override: str | None = None
+) -> str:
+    """Route without the rationale — thin wrapper over
+    ``route_with_reason`` for callers that only need the token.
+
+    Author: venkateshwara doijode
+    """
+    return route_with_reason(question, router_llm, override)[0]

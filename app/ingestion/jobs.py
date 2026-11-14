@@ -30,15 +30,16 @@ def create_job(session: Session) -> IngestionJob:
 _reserve_lock = threading.Lock()
 
 
-def try_reserve_job(session: Session) -> IngestionJob | None:
+def try_reserve_job(session: Session, update: bool = False) -> IngestionJob | None:
     """Atomically check for a live job and launch a new one if free.
 
     The check-then-create runs under a process-wide lock so two
     concurrent POST /ingest requests can't both see "no running job" and
     launch parallel builds over the shared output dir. Returns None when
-    a job is already pending/running (caller maps to 409). Guards only
-    within this process — a multi-worker deployment would need a
-    DB-level unique constraint instead.
+    a job is already pending/running (caller maps to 409). ``update``
+    requests an incremental index merge instead of a full rebuild.
+    Guards only within this process — a multi-worker deployment would
+    need a DB-level unique constraint instead.
 
     Author: venkateshwara doijode
     """
@@ -55,7 +56,7 @@ def try_reserve_job(session: Session) -> IngestionJob | None:
         if running:
             return None
         job = create_job(session)
-        launch_index_job(job.id)
+        launch_index_job(job.id, update=update)
         return job
 
 
@@ -72,14 +73,15 @@ def _set(session: Session, job_id: str, **fields) -> None:
     session.commit()
 
 
-def run_index_job(job_id: str) -> None:
-    """Execute the full GraphRAG build for one job row.
+def run_index_job(job_id: str, update: bool = False) -> None:
+    """Execute the GraphRAG build for one job row.
 
     Runs in a background thread with its own DB session (the request's
     session is request-scoped). Marks the job RUNNING, invokes
-    ``build_graph_index`` on a fresh event loop, refreshes the cached
-    artifact loader so the new graph is immediately searchable, then
-    records DONE + workflow stats — or FAILED with the error text.
+    ``build_graph_index`` on a fresh event loop (incremental merge when
+    ``update`` is set), refreshes the cached artifact loader so the new
+    graph is immediately searchable, then records DONE + workflow stats
+    — or FAILED with the error text.
 
     Author: venkateshwara doijode
     """
@@ -88,7 +90,7 @@ def run_index_job(job_id: str) -> None:
         _set(session, job_id, status=JobStatus.RUNNING.value, started_at=datetime.now(UTC))
         from app.ingestion.graph_index import build_graph_index
 
-        stats = asyncio.run(build_graph_index())
+        stats = asyncio.run(build_graph_index(update=update))
         from app.retrieval.artifacts import load_artifacts
 
         load_artifacts(refresh=True)
@@ -111,11 +113,13 @@ def run_index_job(job_id: str) -> None:
         session.close()
 
 
-def launch_index_job(job_id: str) -> threading.Thread:
+def launch_index_job(job_id: str, update: bool = False) -> threading.Thread:
     """Spawn a daemon thread running ``run_index_job`` for ``job_id``.
 
     Author: venkateshwara doijode
     """
-    t = threading.Thread(target=run_index_job, args=(job_id,), daemon=True)
+    t = threading.Thread(
+        target=run_index_job, args=(job_id,), kwargs={"update": update}, daemon=True
+    )
     t.start()
     return t

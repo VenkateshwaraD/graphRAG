@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     # X-API-Key required on every route except health probes.
     # Empty disables auth (local dev).
     api_key: str = ""
+    # Scoped keys: {"key": {"groups": ["faculty"], "write": false}} —
+    # each grants read access to the named doc groups (["*"] = all).
+    api_keys_json: str = ""
+    # Optional Langfuse tracing — enabled only when the package is
+    # installed AND both keys are set.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
     max_upload_bytes: int = 25 * 1024 * 1024
 
     @field_validator("graphrag_root", "lancedb_uri", "upload_dir", mode="after")

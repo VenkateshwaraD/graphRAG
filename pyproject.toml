@@ -41,6 +41,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "app/api/routers/*.py" = ["B008"]          # Depends() is the FastAPI idiom
+"app/api/deps.py" = ["B008"]               # Depends() is the FastAPI idiom
 "tests/conftest.py" = ["E402"]             # env must be set before app imports
 "scripts/*.py" = ["E402"]
 

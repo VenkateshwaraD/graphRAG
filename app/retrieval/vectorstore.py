@@ -147,21 +147,42 @@ class LanceChunkStore:
         except Exception:
             logger.warning("FTS index update failed", exc_info=True)
 
+    @staticmethod
+    def _doc_filter(doc_ids: set[str] | list[str] | None) -> str:
+        """WHERE expression restricting results to allowed document ids.
+
+        Author: venkateshwara doijode
+        """
+        if doc_ids is None:
+            return ""
+        ids = ",".join(f"'{d}'" for d in sorted(doc_ids))
+        return f"document_id IN ({ids})" if ids else "document_id = ''"
+
     def vector_search(
-        self, embedding: list[float], k: int, embedding_model: str
+        self,
+        embedding: list[float],
+        k: int,
+        embedding_model: str,
+        doc_ids: set[str] | list[str] | None = None,
     ) -> list[RetrievedChunk]:
         """Cosine search over chunks produced by the ACTIVE embedding model only —
         stale embeddings from a previous model are never silently compared.
 
-        Returns up to ``k`` hits scored ``1 - distance``; failures log a
-        warning and yield [] so the FTS leg can still answer.
+        ``doc_ids`` scopes results to documents the caller may see (RBAC);
+        an empty set matches nothing. Returns up to ``k`` hits scored
+        ``1 - distance``; failures log a warning and yield [] so the FTS
+        leg can still answer.
 
         Author: venkateshwara doijode
         """
         try:
+            where = f"embedding_model = '{embedding_model}'"
+            df = self._doc_filter(doc_ids)
+            if df:
+                where += f" AND {df}"
             results = (
                 self.table.search(embedding)
-                .where(f"embedding_model = '{embedding_model}'")
+                .where(where)
                 .limit(k)
                 .to_list()
             )
@@ -179,16 +200,23 @@ class LanceChunkStore:
             for r in results
         ]
 
-    def fts_search(self, query: str, k: int) -> list[RetrievedChunk]:
+    def fts_search(
+        self, query: str, k: int, doc_ids: set[str] | list[str] | None = None
+    ) -> list[RetrievedChunk]:
         """Tantivy full-text search returning up to ``k`` BM25-scored hits.
 
-        Failures log a warning and yield [] so the vector leg can still
-        answer.
+        ``doc_ids`` scopes results to documents the caller may see
+        (RBAC). Failures log a warning and yield [] so the vector leg can
+        still answer.
 
         Author: venkateshwara doijode
         """
         try:
-            results = self.table.search(query, query_type="fts").limit(k).to_list()
+            q = self.table.search(query, query_type="fts")
+            df = self._doc_filter(doc_ids)
+            if df:
+                q = q.where(df)
+            results = q.limit(k).to_list()
         except Exception:
             logger.warning("FTS search failed", exc_info=True)
             return []

@@ -28,8 +28,10 @@ def test_upload_and_chat_and_source(client):
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["route"] in {"hybrid", "traverse", "local", "global"}
+    assert data["route_reason"] is not None
     assert data["conversation_id"]
     assert data["citations"] and data["citations"][0]["document_id"] == doc["id"]
+    assert data["citations"][0]["score"] is not None
 
     r = client.get(f"/sources/{doc['id']}")
     assert r.status_code == 200
@@ -103,3 +105,54 @@ def test_upload_size_limit(client, monkeypatch):
         files={"file": ("big.txt", b"x" * 64)},
     )
     assert r.status_code == 413
+
+
+def test_review_flow(client):
+    """Submit a verdict -> it appears in the review list; the queue
+    stays empty while no index is built.
+
+    Author: venkateshwara doijode
+    """
+    r = client.post(
+        "/graph/review",
+        json={
+            "source": "CS-501",
+            "target": "PRIYA RAMAN",
+            "description": "taught by",
+            "verdict": "rejected",
+            "note": "wrong extraction",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["verdict"] == "rejected" and body["rel_hash"]
+
+    r = client.get("/graph/review")
+    assert r.status_code == 200
+    assert any(x["rel_hash"] == body["rel_hash"] for x in r.json())
+
+    # same relationship re-posted updates rather than duplicates
+    r = client.post(
+        "/graph/review",
+        json={
+            "source": "CS-501",
+            "target": "PRIYA RAMAN",
+            "description": "taught by",
+            "verdict": "approved",
+        },
+    )
+    assert r.status_code == 201
+    assert r.json()["verdict"] == "approved"
+    rows = client.get("/graph/review").json()
+    assert sum(1 for x in rows if x["rel_hash"] == body["rel_hash"]) == 1
+
+
+def test_review_queue_and_subgraph_empty_index(client):
+    """No index built -> empty review queue; subgraph 404s unknown
+    entities rather than erroring.
+
+    Author: venkateshwara doijode
+    """
+    assert client.get("/graph/review/queue").json() == []
+    r = client.get("/graph/subgraph/NOPE")
+    assert r.status_code == 404

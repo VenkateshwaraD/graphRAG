@@ -72,6 +72,7 @@ def main() -> None:
         hits_total = 0
         cov_total = 0.0
         rr_total = 0.0
+        path_qs = path_hit = 0
         for q, gold in LABELED:
             if name == "hybrid":
                 results = HybridRetriever(store, embedder).retrieve(q, k=args.k)
@@ -94,11 +95,31 @@ def main() -> None:
                 0,
             )
             rr_total += 1.0 / rank if rank else 0.0
+            # path accuracy: on multi-hop questions, did a GOLD chunk
+            # arrive via a real multi-entity hop path (not a duplicate-
+            # ridden or trivial one)? Measures traversal correctness,
+            # not just doc recall.
+            if len(gold) > 1:
+                path_qs += 1
+                gold_paths = [
+                    r.meta.get("hop_path")
+                    for r in results
+                    if stems.get(r.document_id) in gold and r.meta
+                ]
+                ok_path = any(
+                    hp and len(set(hp)) == len(hp) and len(hp) >= 2
+                    for hp in gold_paths
+                )
+                path_hit += bool(ok_path)
             print(f"  [{name}] hit={hit} cov={coverage:.2f} q={q[:60]!r} got={sorted(retrieved)}")
         n = len(LABELED)
+        extra = (
+            f"  path_accuracy={path_hit/path_qs:.2f} ({path_hit}/{path_qs} multi-hop)"
+            if path_qs else ""
+        )
         print(
             f"{name}: recall@{args.k}={hits_total/n:.2f}  "
-            f"gold_coverage={cov_total/n:.2f}  MRR={rr_total/n:.2f}"
+            f"gold_coverage={cov_total/n:.2f}  MRR={rr_total/n:.2f}{extra}"
         )
 
     session.close()

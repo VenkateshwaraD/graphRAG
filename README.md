@@ -31,10 +31,14 @@ Ingestion: upload → extract (pdf/docx/txt/md) → chunk → embed
   the router LLM decomposes the question into entity anchors, anchors
   seed a best-first expansion keeping several scored candidate paths
   per node (edge weight × description relevance, decayed by depth),
-  and expansion stops early once enough evidence is found — depth is
-  derived from the question, capped by `TRAVERSE_K_HOPS`. Hops are
-  auditable: citations carry the entity path and relationship
-  directions.
+  expansion stops early once enough evidence is found, and weak
+  evidence is pruned before ranking — depth is derived from the
+  question, capped by `TRAVERSE_K_HOPS`. Temporal scoping (`as_of`
+  param, a year in the question, or recency wording) deprioritizes
+  mismatched-dated evidence. Hops are auditable: citations carry the
+  entity path, alternate paths, relationship directions, extracted
+  years, and path scores. Reviewer-rejected relationships are excluded
+  from the graph (human-in-the-loop).
 - **local** — GraphRAG LocalSearch: entity-anchored neighborhoods.
 - **global** — GraphRAG GlobalSearch: map-reduce over community reports.
 - **hybrid** — chunk-level vector similarity + full-text search, RRF-merged.
@@ -75,10 +79,21 @@ external DB needed.
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | shared by indexing AND query paths |
 | `EMBEDDING_DIMS` | 384 | must match model; also sets GraphRAG `vector_size` |
 | `TRAVERSE_K_HOPS` | 2 | max hop depth cap for traverse (depth adapts to the question) |
-| `API_KEY` | — | `X-API-Key` required on all routes except `/healthz`+`/readyz`; unset = auth off |
+| `API_KEY` | — | admin `X-API-Key` on all routes except `/healthz`+`/readyz`; unset = auth off |
+| `API_KEYS_JSON` | — | scoped keys: `{"k": {"groups": ["faculty"], "write": false}}` — role-based doc-group access |
 | `MAX_UPLOAD_BYTES` | 25 MB | upload size cap → `413` when exceeded |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | — | optional Langfuse tracing (only when the package is installed) |
 | `GRAPHRAG_COMMUNITY_LEVEL` | 0 | community level for global search |
 | `GRAPHRAG_MAX_GLEANINGS` | 1 | entity-extraction passes |
+
+### Role-based document groups
+
+`API_KEY` is the admin principal (all groups, write). `API_KEYS_JSON`
+adds scoped principals — each key lists the `doc_group`s it may read
+and whether it may write. Uploads take `?doc_group=`; list/get/source/
+delete and every retriever (vector, FTS, traverse, local/global
+citations) filter to the caller's groups. `write=false` keys get 403 on
+upload, delete, `POST /ingest`, and `POST /graph/review`.
 
 ### Provider-agnostic LLMs
 
@@ -104,25 +119,33 @@ when `API_KEY` is configured (unset → auth disabled for local dev).
 
 | Route | Purpose |
 |---|---|
-| `POST /documents` | upload (multipart) → extract/chunk/embed |
-| `GET /documents`, `DELETE /documents/{id}` | list / remove |
-| `POST /ingest` | async GraphRAG index job; `GET /ingest/{job}` status |
-| `POST /chat` | `{question, mode?, conversation_id?, k?}` → answer + citations |
+| `POST /documents` | upload (multipart, `?doc_group=`) → extract/chunk/embed — write key required |
+| `GET /documents`, `DELETE /documents/{id}` | list / remove — group-filtered, delete needs write |
+| `POST /ingest` | async GraphRAG index job (`?update=true` = incremental merge); `GET /ingest/{job}` status — write key required |
+| `POST /chat` | `{question, mode?, conversation_id?, k?, as_of?}` → answer + route rationale + citations + `warning` when sources disagree |
 | `GET /sources/{doc_id}` | source document text (citation drill-down) |
 | `GET /graph/{stats,entities,relationships}` | browse the knowledge graph |
+| `GET /graph/subgraph/{entity}?depth=` | neighborhood subgraph for visualization |
+| `GET /graph/review/queue`, `POST /graph/review`, `GET /graph/review` | human review of extracted relationships (rejected edges leave the traversal graph) |
 | `GET /healthz`, `GET /readyz` | liveness / index-readiness |
 
 ## Evaluation
 
 ```bash
-.venv/bin/python scripts/eval_retrieval.py     # recall@k + MRR per retriever
+.venv/bin/python scripts/eval_retrieval.py     # recall@k + MRR + multi-hop path accuracy
 .venv/bin/python scripts/eval_qa.py            # multi-hop answer correctness (needs API + index)
+.venv/bin/python scripts/eval_benchmark.py     # vector vs FTS vs hybrid vs traverse side-by-side
+.venv/bin/python scripts/eval_quality.py       # CI gate: ruff + pytest (+ --with-retrieval floors)
 ```
+
+CI runs `scripts/eval_quality.py` (see `.github/workflows/ci.yml`).
+`--with-retrieval` additionally enforces recall/coverage floors and is
+meant for a seeded environment — the offline suite can't build an index.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest        # 22 tests, fully offline (fake LLM + hash embedder)
+.venv/bin/python -m pytest        # fully offline (fake LLM + hash embedder)
 .venv/bin/ruff check .
 ```
 
@@ -130,15 +153,27 @@ when `API_KEY` is configured (unset → auth disabled for local dev).
 
 - `--loop asyncio` is required: `graphrag_llm` calls `nest_asyncio2.apply()`
   at import, which cannot patch uvloop.
-- GraphRAG indexing is LLM-heavy (extraction + community reports). It
-  re-indexes the whole staged corpus; incremental updates are limited.
+- GraphRAG indexing is LLM-heavy (extraction + community reports).
+  `POST /ingest?update=true` runs GraphRAG's incremental path, which
+  diffs input against the previous index and merges only new/changed
+  content. Every successful build snapshots `output/` to
+  `output.versions/<ts>` (last 5 kept) and the pre-build copy restores
+  automatically on failure.
 - `GRAPHRAG_COMMUNITY_LEVEL` must match levels actually produced by
   Leiden — small corpora produce only level 0.
-- This build dropped the original multi-tenant/permission-aware
-  requirements by decision — see git history / plan docs.
-- Auth is a shared `X-API-Key`, not per-user identity — there is no
-  authorization layer beyond "has the key".
+- Authorization is role-based document groups via `API_KEYS_JSON` — not
+  per-user identity. The shared admin key remains for local/dev.
 - `POST /ingest` allows one live job (atomic in-process); a
   multi-worker deployment would need DB-level coordination.
-- `POST /ingest` keeps the previous graph output until the new build
-  succeeds — a failed reindex restores it automatically.
+- Citation validation (`VALIDATE_SYSTEM`) is one cheap router-model
+  call that grades each snippet against the answer — `supported=false`
+  flags and `warning` (contradicting sources) are advisory, they don't
+  rewrite the answer.
+- Per-node timings + counts land on `Message.metrics`; Langfuse tracing
+  activates only when the package + keys are present.
+- Temporal filtering is heuristic: years are regex-extracted from
+  text units and edge descriptions, so it catches stated dates, not
+  inferred validity intervals.
+- Relationship review verdicts key on content hash (source+target+
+  description) — they survive reindexing, and a changed description
+  re-queues the item for review.

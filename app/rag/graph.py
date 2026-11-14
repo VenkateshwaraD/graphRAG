@@ -21,11 +21,57 @@ from app.db.models import Conversation, Document, Message
 from app.ingestion.embed import EmbeddingProvider
 from app.rag.llm import LLMProvider
 from app.rag.prompts import ANSWER_SYSTEM, ASSESS_SYSTEM, INSUFFICIENT_CONTEXT
-from app.rag.router import route_question
+from app.rag.router import route_with_reason
 from app.retrieval.artifacts import load_artifacts
 from app.retrieval.vectorstore import LanceChunkStore, RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _validate(
+    answer: str, chunks: list[RetrievedChunk], router_llm: LLMProvider
+) -> tuple[dict[int, bool], str | None]:
+    """Verify claim-to-source support and flag contradictory evidence.
+
+    One router-model call grades each snippet against the answer
+    (``n:yes``/``n:no``) and reports conflicting snippet pairs
+    (``conflicts: n vs m``). Returns {citation_n: supported} — missing
+    entries mean "unknown" — plus a human-readable warning when sources
+    disagree. Any LLM/parse failure degrades to empty results, never an
+    error.
+
+    Author: venkateshwara doijode
+    """
+    import re
+
+    from app.rag.prompts import VALIDATE_SYSTEM
+
+    preview = "\n".join(f"[{i+1}] {c.text[:200]}" for i, c in enumerate(chunks))
+    try:
+        raw = router_llm.generate(
+            [
+                {"role": "system", "content": VALIDATE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": f"Answer:\n{answer}\n\nSnippets:\n{preview}",
+                },
+            ],
+            max_tokens=128,
+        ).lower()
+    except Exception:
+        return {}, None
+    supported = {
+        int(n): v == "yes"
+        for n, v in re.findall(r"(\d+)\s*[:.\-)]\s*(yes|no)\b", raw)
+    }
+    conflicts = re.findall(r"(\d+)\s+vs\.?\s+(\d+)", raw)
+    warning = (
+        "sources disagree: "
+        + ", ".join(f"[{a}] vs [{b}]" for a, b in conflicts)
+        if conflicts
+        else None
+    )
+    return supported, warning
 
 
 class RAGState(TypedDict, total=False):
@@ -37,11 +83,16 @@ class RAGState(TypedDict, total=False):
     question: str
     mode: str | None
     k: int
+    as_of: int | None
+    allowed_doc_ids: set[str] | None
     route: str
+    route_reason: str
     expanded: bool
     chunks: list[RetrievedChunk]
     answer: str
     citations: list[dict]
+    warning: str | None
+    metrics: dict
     error: str | None
 
 
@@ -64,13 +115,32 @@ def build_rag_graph(
     Author: venkateshwara doijode
     """
 
-    async def route_node(state: RAGState) -> dict:
-        """Pick the retrieval route (LLM classifier or ``mode`` override).
+    def _timed(name, fn):
+        """Wrap a node so its wall-clock time lands in state.metrics.
 
         Author: venkateshwara doijode
         """
-        route = route_question(state["question"], router_llm, state.get("mode"))
-        return {"route": route}
+        import time
+
+        async def wrapper(state: RAGState) -> dict:
+            t0 = time.perf_counter()
+            out = await fn(state) or {}
+            metrics = dict(state.get("metrics") or {})
+            metrics[f"{name}_ms"] = round((time.perf_counter() - t0) * 1000)
+            return {**out, "metrics": metrics}
+
+        return wrapper
+
+    async def route_node(state: RAGState) -> dict:
+        """Pick the retrieval route (LLM classifier or ``mode`` override)
+        and keep the router's raw reply for explainability.
+
+        Author: venkateshwara doijode
+        """
+        route, reason = route_with_reason(
+            state["question"], router_llm, state.get("mode")
+        )
+        return {"route": route, "route_reason": reason}
 
     async def retrieve_node(state: RAGState) -> dict:
         """Dispatch to the selected retriever and normalize results.
@@ -88,26 +158,31 @@ def build_rag_graph(
             from app.retrieval.hybrid import HybridRetriever
 
             chunks = HybridRetriever(store, embedder).retrieve(
-                state["question"], k=state["k"]
+                state["question"], k=state["k"],
+                doc_ids=state.get("allowed_doc_ids"),
             )
             return {"chunks": chunks}
 
         artifacts = load_artifacts()
         if route == "traverse":
+            from app.retrieval.review import load_rejections
             from app.retrieval.traverse import traverse
 
             try:
                 chunks = traverse(
                     state["question"], artifacts, embedder,
                     max_hops=k_hops, max_items=state["k"],
-                    router_llm=router_llm,
+                    router_llm=router_llm, as_of=state.get("as_of"),
+                    rejections=load_rejections(),
+                    allowed_doc_ids=state.get("allowed_doc_ids"),
                 )
             except Exception:
                 logger.exception("traverse failed; falling back to hybrid")
                 from app.retrieval.hybrid import HybridRetriever
 
                 chunks = HybridRetriever(store, embedder).retrieve(
-                    state["question"], k=state["k"]
+                    state["question"], k=state["k"],
+                    doc_ids=state.get("allowed_doc_ids"),
                 )
                 return {"route": "hybrid", "chunks": chunks, "expanded": True}
             return {"chunks": chunks}
@@ -131,7 +206,8 @@ def build_rag_graph(
             from app.retrieval.hybrid import HybridRetriever
 
             chunks = HybridRetriever(store, embedder).retrieve(
-                state["question"], k=state["k"]
+                state["question"], k=state["k"],
+                doc_ids=state.get("allowed_doc_ids"),
             )
             return {"route": "hybrid", "chunks": chunks, "expanded": True}
         return {"error": f"unknown route {route}"}
@@ -159,15 +235,19 @@ def build_rag_graph(
             from app.retrieval.hybrid import HybridRetriever
 
             return HybridRetriever(store, embedder).retrieve(
-                state["question"], k=state["k"]
+                state["question"], k=state["k"],
+                doc_ids=state.get("allowed_doc_ids"),
             )
 
         def _traverse() -> list[RetrievedChunk]:
+            from app.retrieval.review import load_rejections
             from app.retrieval.traverse import traverse
 
             return traverse(
                 state["question"], load_artifacts(), embedder,
                 max_hops=k_hops, max_items=state["k"], router_llm=router_llm,
+                as_of=state.get("as_of"), rejections=load_rejections(),
+                allowed_doc_ids=state.get("allowed_doc_ids"),
             )
 
         if not chunks:
@@ -258,16 +338,35 @@ def build_rag_graph(
                 "text_unit_id": c.chunk_id if c.source == "traverse" else None,
                 "excerpt": c.text[:400],
                 "hop_path": c.meta.get("hop_path") if c.meta else None,
+                "edge_directions": (
+                    c.meta.get("edge_directions") if c.meta else None
+                ),
+                "alt_paths": c.meta.get("alt_paths") if c.meta else None,
+                "years": c.meta.get("years") if c.meta else None,
+                "score": round(float(c.score), 4),
             }
             for i, c in enumerate(chunks)
         ]
-        return {"answer": answer, "citations": citations}
+        supported, warning = _validate(answer, chunks, router_llm)
+        for i, c in enumerate(citations):
+            c["supported"] = supported.get(i + 1)
+        metrics = dict(state.get("metrics") or {})
+        metrics["n_chunks"] = len(chunks)
+        metrics["n_unsupported"] = sum(
+            1 for v in supported.values() if v is False
+        )
+        return {
+            "answer": answer,
+            "citations": citations,
+            "warning": warning,
+            "metrics": metrics,
+        }
 
     g = StateGraph(RAGState)
-    g.add_node("route", route_node)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("assess", assess_node)
-    g.add_node("generate", generate_node)
+    g.add_node("route", _timed("route", route_node))
+    g.add_node("retrieve", _timed("retrieve", retrieve_node))
+    g.add_node("assess", _timed("assess", assess_node))
+    g.add_node("generate", _timed("generate", generate_node))
     g.set_entry_point("route")
     g.add_edge("route", "retrieve")
     g.add_edge("retrieve", "assess")
@@ -283,12 +382,15 @@ def persist_turn(
     answer: str,
     route: str,
     citations: list[dict],
+    route_reason: str | None = None,
+    metrics: dict | None = None,
 ) -> str:
     """Persist one chat turn and return the conversation id.
 
     Resumes the given conversation when it exists, otherwise creates one —
     a stale/unknown id silently starts fresh rather than erroring. Stores
-    the user message plus the assistant message with route + citations.
+    the user message plus the assistant message with route + rationale +
+    citations + per-node latency/quality metrics.
 
     Author: venkateshwara doijode
     """
@@ -305,6 +407,8 @@ def persist_turn(
             content=answer,
             citations={"items": citations},
             route=route,
+            route_reason=route_reason,
+            metrics=metrics,
         )
     )
     session.commit()

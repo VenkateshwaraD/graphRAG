@@ -5,6 +5,7 @@ import pytest
 
 from app.ingestion.embed import HashEmbeddingProvider
 from app.retrieval.artifacts import GraphArtifacts
+from app.retrieval.review import rel_key
 from app.retrieval.traverse import build_graph, decompose, link_entities, traverse
 
 
@@ -82,7 +83,8 @@ def test_build_graph(artifacts):
     g = build_graph(artifacts)
     assert g.number_of_nodes() == 4
     assert g.has_edge("CS-501", "PRIYA RAMAN")
-    assert g.edges["CS-501", "PRIYA RAMAN"]["relation_direction"] == "CS-501->PRIYA RAMAN"
+    attrs = next(iter(g.get_edge_data("CS-501", "PRIYA RAMAN").values()))
+    assert attrs["relation_direction"] == "CS-501->PRIYA RAMAN"
 
 
 def test_link_entities_exact(artifacts):
@@ -141,17 +143,20 @@ def test_traverse_empty_graph():
 
 
 def test_traverse_no_cycles(cycle_artifacts):
-    """Triangle graph: paths never revisit a node they already contain.
+    """Triangle graph: paths can't loop — a repeated node only appears
+    as the closing node of a cross-edge.
 
     A-B-C-A would loop forever without the per-path cycle check; the
-    C->A edge can still contribute evidence via the A-B-C path.
+    C->A edge still contributes its evidence as a cyclic path tail.
 
     Author: venkateshwara doijode
     """
     hits = traverse("a", cycle_artifacts, HashEmbeddingProvider(), max_hops=4)
     for h in hits:
         path = h.meta["hop_path"]
-        assert len(path) == len(set(path)), path
+        assert len(path[:-1]) == len(set(path[:-1])), path
+    # the back-edge's text unit is evidence too
+    assert any(h.chunk_id == "tu_ca" for h in hits)
 
 
 def test_traverse_scores_and_provenance(artifacts):
@@ -182,3 +187,179 @@ def test_traverse_early_stop(artifacts):
     """
     hits = traverse("CS-501", artifacts, HashEmbeddingProvider(), max_hops=3, max_items=1)
     assert len(hits) <= 1
+
+
+def _df(rows):
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def temporal_artifacts():
+    """ACME has two symmetric HQ edges; their text units carry years.
+
+    ACME -[hq]-> OLD HQ (tu_old: Boston, 1999)
+    ACME -[hq]-> NEW HQ (tu_new: Austin, 2024)
+
+    Author: venkateshwara doijode
+    """
+    entities = _df(
+        [
+            {"id": "e1", "title": "ACME", "type": "org", "description": ""},
+            {"id": "e2", "title": "OLD HQ", "type": "loc", "description": ""},
+            {"id": "e3", "title": "NEW HQ", "type": "loc", "description": ""},
+        ]
+    )
+    relationships = _df(
+        [
+            {"source": "ACME", "target": "OLD HQ", "weight": 1.0,
+             "description": "headquartered at", "text_unit_ids": ["tu_old"]},
+            {"source": "ACME", "target": "NEW HQ", "weight": 1.0,
+             "description": "headquartered at", "text_unit_ids": ["tu_new"]},
+        ]
+    )
+    text_units = _df(
+        [
+            {"id": "tu_old", "text": "Acme was headquartered in Boston in 1999.",
+             "document_id": "d"},
+            {"id": "tu_new", "text": "In 2024 Acme moved its headquarters to Austin.",
+             "document_id": "d"},
+        ]
+    )
+    return GraphArtifacts(entities=entities, relationships=relationships, text_units=text_units)
+
+
+def test_traverse_as_of_penalizes_future(temporal_artifacts):
+    """as_of=2020: the 2024-dated unit is scored below the 1999 one —
+    same symmetric edges, so the gap is purely temporal.
+
+    Author: venkateshwara doijode
+    """
+    hits = traverse(
+        "where is ACME hq?", temporal_artifacts, HashEmbeddingProvider(),
+        max_hops=2, as_of=2020,
+    )
+    by_id = {h.chunk_id: h for h in hits}
+    assert by_id["tu_old"].score > by_id["tu_new"].score
+    assert by_id["tu_new"].meta["years"] == [2024]
+
+
+def test_traverse_recency_prefers_latest(temporal_artifacts):
+    """'currently' -> prefer the latest-dated evidence; the stale unit
+    is deprioritized rather than dropped.
+
+    Author: venkateshwara doijode
+    """
+    hits = traverse(
+        "where is ACME hq currently?", temporal_artifacts,
+        HashEmbeddingProvider(), max_hops=2,
+    )
+    by_id = {h.chunk_id: h for h in hits}
+    assert by_id["tu_new"].score > by_id["tu_old"].score
+
+
+def test_traverse_rejected_edge_excluded(artifacts):
+    """Human-rejected relationships never enter the traversal graph.
+
+    Author: venkateshwara doijode
+    """
+    key = rel_key("CS-501", "PRIYA RAMAN", "taught by")
+    g = build_graph(artifacts, rejections={key})
+    assert not g.has_edge("CS-501", "PRIYA RAMAN")
+    hits = traverse(
+        "Where is the lab of the professor who teaches CS-501?",
+        artifacts, HashEmbeddingProvider(), max_hops=3, rejections={key},
+    )
+    assert hits == []
+
+
+@pytest.fixture
+def diamond_artifacts():
+    """Two disjoint routes to the same evidence edge.
+
+    ALPHA -[ab]-> BETA -[bx]-> XTRA -[xy]-> YPSI
+    ALPHA -[ac]-> GAMMA -[cx]-> XTRA
+
+    Author: venkateshwara doijode
+    """
+    entities = _df(
+        [
+            {"id": f"e{i}", "title": t, "type": "x", "description": ""}
+            for i, t in enumerate(["ALPHA", "BETA", "GAMMA", "XTRA", "YPSI"], 1)
+        ]
+    )
+    relationships = _df(
+        [
+            {"source": "ALPHA", "target": "BETA", "weight": 1.0,
+             "description": "ab", "text_unit_ids": []},
+            {"source": "ALPHA", "target": "GAMMA", "weight": 1.0,
+             "description": "ac", "text_unit_ids": []},
+            {"source": "BETA", "target": "XTRA", "weight": 1.0,
+             "description": "bx", "text_unit_ids": []},
+            {"source": "GAMMA", "target": "XTRA", "weight": 1.0,
+             "description": "cx", "text_unit_ids": []},
+            {"source": "XTRA", "target": "YPSI", "weight": 1.0,
+             "description": "xy", "text_unit_ids": ["tu_xy"]},
+        ]
+    )
+    text_units = _df(
+        [{"id": "tu_xy", "text": "XTRA connects to YPSI.", "document_id": "d"}]
+    )
+    return GraphArtifacts(entities=entities, relationships=relationships, text_units=text_units)
+
+
+def test_traverse_alternate_paths(diamond_artifacts):
+    """The diamond gives the shared edge two candidate paths; the loser
+    surfaces as alt_paths instead of being silently discarded.
+
+    Author: venkateshwara doijode
+    """
+    hits = traverse("ALPHA", diamond_artifacts, HashEmbeddingProvider(), max_hops=3)
+    hit = next(h for h in hits if h.chunk_id == "tu_xy")
+    assert hit.meta["hop_path"]
+    assert hit.meta["alt_paths"], "expected an alternate path"
+    for p in [hit.meta["hop_path"], *hit.meta["alt_paths"]]:
+        assert p[0] == "ALPHA" and p[-1] == "YPSI"
+
+
+@pytest.fixture
+def prune_artifacts():
+    """ALPHA has one strong edge (tuA) and one junk edge (tuB, w=0.05,
+    irrelevant description) — the weak tail must be pruned.
+
+    Author: venkateshwara doijode
+    """
+    entities = _df(
+        [
+            {"id": "e1", "title": "ALPHA", "type": "x", "description": ""},
+            {"id": "e2", "title": "BETA", "type": "x", "description": ""},
+            {"id": "e3", "title": "ZETA", "type": "x", "description": ""},
+        ]
+    )
+    relationships = _df(
+        [
+            {"source": "ALPHA", "target": "BETA", "weight": 1.0,
+             "description": "professor teaches course", "text_unit_ids": ["tuA"]},
+            {"source": "ALPHA", "target": "ZETA", "weight": 0.05,
+             "description": "miscellaneous link", "text_unit_ids": ["tuB"]},
+        ]
+    )
+    text_units = _df(
+        [
+            {"id": "tuA", "text": "alpha beta good", "document_id": "d"},
+            {"id": "tuB", "text": "alpha zeta weak", "document_id": "d"},
+        ]
+    )
+    return GraphArtifacts(entities=entities, relationships=relationships, text_units=text_units)
+
+
+def test_traverse_prunes_weak_evidence(prune_artifacts):
+    """Evidence far below the top score is cut before ranking — weak
+    tail branches only add noise to context generation.
+
+    Author: venkateshwara doijode
+    """
+    hits = traverse(
+        "alpha professor", prune_artifacts, HashEmbeddingProvider(), max_hops=1
+    )
+    ids = {h.chunk_id for h in hits}
+    assert "tuA" in ids and "tuB" not in ids

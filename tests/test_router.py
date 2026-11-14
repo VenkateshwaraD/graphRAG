@@ -1,7 +1,7 @@
 import pytest
 
 from app.rag.providers.fake import FakeLLM
-from app.rag.router import route_question
+from app.rag.router import route_question, route_with_reason
 
 
 def test_override_valid():
@@ -67,3 +67,16 @@ def test_word_boundary_blocks_substring():
     """
     llm = FakeLLM(canned="globalization effects")
     assert route_question("q", llm) == "hybrid"
+
+
+def test_route_with_reason():
+    """The raw router reply comes back as the rationale; overrides get
+    a synthetic reason.
+
+    Author: venkateshwara doijode
+    """
+    llm = FakeLLM(canned="use traverse, not local")
+    route, reason = route_with_reason("q", llm)
+    assert route == "traverse" and "traverse" in reason
+    route, reason = route_with_reason("q", llm, override="global")
+    assert route == "global" and reason == "mode override: global"
