@@ -6,25 +6,41 @@ documents. Upload docs → Microsoft GraphRAG builds a knowledge graph
 selects a retrieval strategy per question → answers come back with
 source citations.
 
+Full operations guide: **[docs/GUIDE.md](docs/GUIDE.md)** — agent
+workflow deep-dive, configuration reference, run instructions,
+evaluation evidence, and Streamlit screen walkthrough.
+
 ## Architecture
 
-```
-Streamlit UI ──> FastAPI ──> LangGraph workflow
-                                │
-                     route (LLM, or ?mode= override)
-                                │
-          ┌──────────┬──────────┼──────────┐
-          v          v          v          v
-       traverse   local      global     hybrid
-       best-first GraphRAG   GraphRAG   LanceDB
-       multi-path Local      Global     vector+FTS (RRF)
-          └──────────┴──────────┴──────────┘
-                    generate / cited answer
+```mermaid
+flowchart TB
+    UI[Streamlit UI :8501] -->|X-API-Key| API[FastAPI :8000]
+    CLI[scripts / curl] -->|X-API-Key| API
+    API --> AUTH["deps.require_api_key → ApiPrincipal<br/>(API_KEY admin · API_KEYS_JSON scoped groups)"]
+    AUTH --> CHAT["/chat → LangGraph workflow"]
+    AUTH --> DOCS["/documents · /sources<br/>doc_group filtered"]
+    AUTH --> ING["/ingest → job thread<br/>(atomic reserve, ?update=)"]
 
-Ingestion: upload → extract (pdf/docx/txt/md) → chunk → embed
-           → SQLite (metadata) + LanceDB (vectors+FTS)
-           → stage into data/graphrag/input → POST /ingest runs
-             GraphRAG indexing → parquet artifacts + LanceDB
+    subgraph G["LangGraph: route → retrieve → assess → generate"]
+        R1[route_node<br/>router LLM / mode override] --> R2[retrieve_node]
+        R2 --> R3[assess_node<br/>empty or irrelevant → 1 retry]
+        R3 --> R4["generate_node<br/>answer + _validate()<br/>supported / warning"]
+    end
+    CHAT --> G
+
+    G --> TRV[traverse<br/>MultiDiGraph best-first]
+    G --> HYB[hybrid<br/>vector + FTS, RRF]
+    G --> LS[GraphRAG<br/>LocalSearch]
+    G --> GS[GraphRAG<br/>GlobalSearch]
+
+    TRV --> ART["data/graphrag/output/<br/>parquet artifacts"]
+    REV["/graph/review*<br/>HITL verdicts"] -.rejected edges.-> TRV
+    HYB --> LDB[(LanceDB<br/>vectors + FTS)]
+    ING --> GRA["build_graph_index<br/>→ artifacts + versions"]
+    DOCS --> PIPE["pipeline<br/>extract→chunk→embed"]
+    PIPE --> LDB
+    PIPE --> STAGE["graphrag/input staging"]
+    CHAT --> DB[(SQLite<br/>docs·msgs·jobs·reviews)]
 ```
 
 - **traverse** — guided multi-hop over the extracted knowledge graph:

@@ -125,8 +125,12 @@ def build_rag_graph(
         async def wrapper(state: RAGState) -> dict:
             t0 = time.perf_counter()
             out = await fn(state) or {}
-            metrics = dict(state.get("metrics") or {})
-            metrics[f"{name}_ms"] = round((time.perf_counter() - t0) * 1000)
+            # merge node's own metrics contributions, then add timing
+            metrics = {
+                **(state.get("metrics") or {}),
+                **(out.get("metrics") or {}),
+                f"{name}_ms": round((time.perf_counter() - t0) * 1000),
+            }
             return {**out, "metrics": metrics}
 
         return wrapper

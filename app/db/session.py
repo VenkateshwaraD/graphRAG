@@ -38,15 +38,45 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
-    """Create all ORM tables if they do not already exist.
+    """Create all ORM tables and add any missing columns.
 
-    Called once from the FastAPI lifespan and by tests; idempotent.
+    ``create_all`` covers new tables; the column sync below upgrades
+    existing databases (e.g. adding ``documents.doc_group`` or
+    ``messages.metrics``) without a full migration framework — new ORM
+    columns are nullable/defaulted by convention, so ``ALTER TABLE
+    ADD COLUMN`` is always safe.
 
     Author: venkateshwara doijode
     """
+    from sqlalchemy import inspect, text
+
     from app.db.models import Base
 
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        existing = {
+            t: {c["name"] for c in inspect(conn).get_columns(t)}
+            for t in Base.metadata.tables
+        }
+        for table in Base.metadata.tables.values():
+            for col in table.columns:
+                if col.name not in existing.get(table.name, ()):
+                    ddl = str(
+                        col.type.compile(dialect=engine.dialect)
+                    )
+                    stmt = f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}'
+                    conn.execute(text(stmt))
+                    # Python-side defaults don't apply to existing rows —
+                    # backfill simple scalar defaults so filters treat
+                    # legacy rows as the default value.
+                    if col.default is not None and col.default.is_scalar:
+                        conn.execute(
+                            text(
+                                f"UPDATE {table.name} SET {col.name} = :v "
+                                f"WHERE {col.name} IS NULL"
+                            ),
+                            {"v": col.default.arg},
+                        )
 
 
 def get_session() -> Generator[Session, None, None]:
