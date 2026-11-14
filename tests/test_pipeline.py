@@ -37,17 +37,17 @@ def test_failed_ingest_removes_staged_file(session, tmp_path, monkeypatch):
     """
     from app.config import get_settings
 
-    f = tmp_path / "t.txt"
-    f.write_text("hello world " * 50)
-    doc = _doc(session, f)
+    src_file = tmp_path / "t.txt"
+    src_file.write_text("hello world " * 50)
+    doc = _doc(session, src_file)
 
     staged = get_settings().graphrag_root / "input" / f"{doc.id}.txt"
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_text("stale staged text from a previous ingest")
 
     monkeypatch.setattr(pipeline, "get_embedding_provider", lambda: _BoomEmbedder())
-    n = pipeline.process_document(session, doc)
-    assert n == 0
+    n_chunks = pipeline.process_document(session, doc)
+    assert n_chunks == 0
     session.refresh(doc)
     assert doc.status == DocStatus.FAILED.value
     assert not staged.exists()
@@ -59,9 +59,9 @@ def test_failed_ingest_clears_vector_rows(session, tmp_path, monkeypatch):
 
     Author: venkateshwara doijode
     """
-    f = tmp_path / "t.txt"
-    f.write_text("hello world " * 50)
-    doc = _doc(session, f)
+    src_file = tmp_path / "t.txt"
+    src_file.write_text("hello world " * 50)
+    doc = _doc(session, src_file)
 
     store = pipeline.get_vector_store()
     orig_add = store.add_chunks
@@ -71,8 +71,8 @@ def test_failed_ingest_clears_vector_rows(session, tmp_path, monkeypatch):
         raise RuntimeError("lancedb exploded mid-add")
 
     monkeypatch.setattr(store, "add_chunks", flaky_add)
-    n = pipeline.process_document(session, doc)
-    assert n == 0
+    n_chunks = pipeline.process_document(session, doc)
+    assert n_chunks == 0
     session.refresh(doc)
     assert doc.status == DocStatus.FAILED.value
     df = store.table.to_pandas()
@@ -86,11 +86,11 @@ def test_success_ingest_stages_file(session, tmp_path):
     """
     from app.config import get_settings
 
-    f = tmp_path / "t.txt"
-    f.write_text("Turing Hall hosts the Data Systems Lab. " * 5)
-    doc = _doc(session, f)
-    n = pipeline.process_document(session, doc)
-    assert n > 0
+    src_file = tmp_path / "t.txt"
+    src_file.write_text("Turing Hall hosts the Data Systems Lab. " * 5)
+    doc = _doc(session, src_file)
+    n_chunks = pipeline.process_document(session, doc)
+    assert n_chunks > 0
     session.refresh(doc)
     assert doc.status == DocStatus.CHUNKED.value
     staged = get_settings().graphrag_root / "input" / f"{doc.id}.txt"

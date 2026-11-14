@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import ApiPrincipal, require_write
-from app.db.models import RelationshipReview
+from app.api.deps import ApiPrincipal, require_api_key, require_write
+from app.authz import doc_scope, unrestricted
+from app.db.models import Document, RelationshipReview
 from app.db.session import get_session
-from app.retrieval.artifacts import load_artifacts
+from app.retrieval.artifacts import load_artifacts, scope_artifacts, stale_doc_ids
 from app.retrieval.review import record_review, rel_key
 from app.schemas import (
     EntityOut,
@@ -21,156 +22,212 @@ from app.schemas import (
 router = APIRouter(prefix="/graph", tags=["graph"])
 
 
-@router.get("/stats", response_model=GraphStatsOut)
-def stats():
-    """Row counts per artifact frame + whether a graph index exists.
+def _scoped(session: Session, principal: ApiPrincipal):
+    """Artifacts restricted to what the caller's documents can prove —
+    deleted docs are pruned identically since their ids are gone.
 
     Author: venkateshwara doijode
     """
-    a = load_artifacts()
+    return scope_artifacts(load_artifacts(), doc_scope(session, principal))
+
+
+@router.get("/stats", response_model=GraphStatsOut)
+def stats(
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
+    """Row counts per artifact frame + whether a graph index exists.
+
+    Counts reflect the caller's scoped view. ``stale`` is true when the
+    index still contains documents that no longer exist (deleted since
+    the last build) — their artifacts never reach responses, but a
+    rebuild clears them for real.
+
+    Author: venkateshwara doijode
+    """
+    arts = _scoped(session, principal)
+    live = {row[0] for row in session.query(Document.id)}
+    stale = stale_doc_ids(load_artifacts(), live)
     return GraphStatsOut(
-        entities=len(a.entities),
-        relationships=len(a.relationships),
-        communities=len(a.communities),
-        text_units=len(a.text_units),
-        community_reports=len(a.community_reports),
-        indexed=a.indexed,
+        entities=len(arts.entities),
+        relationships=len(arts.relationships),
+        communities=len(arts.communities),
+        text_units=len(arts.text_units),
+        community_reports=len(arts.community_reports),
+        indexed=arts.indexed,
+        stale=bool(stale),
+        stale_documents=len(stale),
     )
 
 
 @router.get("/entities", response_model=list[EntityOut])
-def entities(limit: int = 100):
-    """Browse extracted entities (up to ``limit``) from the built graph.
-
-    Returns [] before any index build. ``title`` is preferred over the
-    raw ``name`` column because GraphRAG normalizes titles.
+def entities(
+    limit: int = 100,
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
+    """Browse extracted entities (up to ``limit``) — only those whose
+    supporting text units all come from documents the caller may see.
 
     Author: venkateshwara doijode
     """
-    a = load_artifacts()
-    if a.entities.empty:
+    arts = _scoped(session, principal)
+    if arts.entities.empty:
         return []
     out = []
-    for _, r in a.entities.head(limit).iterrows():
+    for _, row in arts.entities.head(limit).iterrows():
         out.append(
             EntityOut(
-                id=str(r.get("id", "")),
-                name=str(r.get("title", r.get("name", ""))),
-                type=str(r.get("type", "")) or None,
-                description=str(r.get("description", ""))[:500] or None,
-                degree=int(r.get("degree", 0) or 0),
+                id=str(row.get("id", "")),
+                name=str(row.get("title", row.get("name", ""))),
+                type=str(row.get("type", "")) or None,
+                description=str(row.get("description", ""))[:500] or None,
+                degree=int(row.get("degree", 0) or 0),
             )
         )
     return out
 
 
 @router.get("/relationships", response_model=list[RelationshipOut])
-def relationships(limit: int = 100):
-    """Browse extracted relationships (up to ``limit``).
-
-    Returns [] before any index build.
+def relationships(
+    limit: int = 100,
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
+    """Browse extracted relationships (up to ``limit``) — scoped the
+    same way as entities.
 
     Author: venkateshwara doijode
     """
-    a = load_artifacts()
-    if a.relationships.empty:
+    arts = _scoped(session, principal)
+    if arts.relationships.empty:
         return []
     out = []
-    for _, r in a.relationships.head(limit).iterrows():
+    for _, row in arts.relationships.head(limit).iterrows():
         out.append(
             RelationshipOut(
-                source=str(r.get("source", "")),
-                target=str(r.get("target", "")),
-                description=str(r.get("description", ""))[:500] or None,
-                weight=float(r.get("weight", 0) or 0),
+                source=str(row.get("source", "")),
+                target=str(row.get("target", "")),
+                description=str(row.get("description", ""))[:500] or None,
+                weight=float(row.get("weight", 0) or 0),
             )
         )
     return out
 
 
 @router.get("/subgraph/{entity}", response_model=SubgraphOut)
-def subgraph(entity: str, depth: int = 1):
+def subgraph(
+    entity: str,
+    depth: int = 1,
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
     """Return the ``depth``-hop neighborhood of one entity for
     visualization — nodes plus directed edges with descriptions.
 
-    Matches by case-insensitive title; 404 when the entity is unknown.
-    ``depth`` is capped at 3 to keep payloads small.
+    The graph is built from the caller's scoped artifacts: an entity
+    provable only from unauthorized documents 404s. ``depth`` is capped
+    at 3 to keep payloads small.
 
     Author: venkateshwara doijode
     """
     from app.retrieval.traverse import build_graph
 
-    a = load_artifacts()
-    g = build_graph(a)
+    arts = _scoped(session, principal)
+    net = build_graph(arts)
     node = entity.upper()
-    if node not in g:
+    if node not in net:
         raise HTTPException(404, f"entity {entity!r} not in graph")
     seen = {node}
     frontier = {node}
     edges: dict[tuple[str, str], dict] = {}
     for _ in range(min(max(depth, 1), 3)):
-        nxt = set()
-        for n in frontier:
-            for nbr in g.neighbors(n):
-                edges[(n, nbr)] = g.edges[n, nbr]
-                if nbr not in seen:
-                    seen.add(nbr)
-                    nxt.add(nbr)
-        frontier = nxt
+        next_frontier = set()
+        for current in frontier:
+            for neighbor in net.neighbors(current):
+                edges[(current, neighbor)] = net.edges[current, neighbor]
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
     return SubgraphOut(
         nodes=[
             SubgraphNodeOut(
-                name=n,
-                description=str(g.nodes[n].get("description", ""))[:300] or None,
+                name=name,
+                description=str(net.nodes[name].get("description", ""))[:300]
+                or None,
             )
-            for n in sorted(seen)
+            for name in sorted(seen)
         ],
         edges=[
             SubgraphEdgeOut(
-                source=u,
-                target=v,
-                direction=d.get("relation_direction", f"{u}->{v}"),
-                description=str(d.get("description", ""))[:300] or None,
-                weight=float(d.get("weight", 0) or 0),
+                source=src,
+                target=tgt,
+                direction=edge.get("relation_direction", f"{src}->{tgt}"),
+                description=str(edge.get("description", ""))[:300] or None,
+                weight=float(edge.get("weight", 0) or 0),
             )
-            for (u, v), d in sorted(edges.items())
+            for (src, tgt), edge in sorted(edges.items())
         ],
     )
 
 
 @router.get("/review", response_model=list[ReviewOut])
-def list_reviews(session: Session = Depends(get_session)):
-    """List recorded human review verdicts, newest first.
+def list_reviews(
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
+    """List recorded human review verdicts the caller may see — verdicts
+    on relationships not provable from their documents are hidden.
+    Platform administrators see every verdict.
 
     Author: venkateshwara doijode
     """
-    return (
+    rows = (
         session.query(RelationshipReview)
         .order_by(RelationshipReview.created_at.desc())
         .limit(200)
         .all()
     )
+    if unrestricted(principal):
+        return rows
+    arts = _scoped(session, principal)
+    visible_keys = {
+        rel_key(
+            str(row.get("source", "")).upper(),
+            str(row.get("target", "")).upper(),
+            str(row.get("description", "")),
+        )
+        for _, row in arts.relationships.iterrows()
+    } if not arts.relationships.empty else set()
+    return [review for review in rows if review.rel_hash in visible_keys]
 
 
 @router.get("/review/queue", response_model=list[ReviewItemOut])
-def review_queue(limit: int = 50, session: Session = Depends(get_session)):
+def review_queue(
+    limit: int = 50,
+    principal: ApiPrincipal = Depends(require_api_key),
+    session: Session = Depends(get_session),
+):
     """Relationships not yet reviewed — the human-in-the-loop worklist.
 
     Review keys are content hashes, so a rebuilt index only re-queues
-    relationships whose description text actually changed.
+    relationships whose description text actually changed. The queue is
+    scoped to relationships provable from the caller's documents.
 
     Author: venkateshwara doijode
     """
-    a = load_artifacts()
-    if a.relationships.empty:
+    arts = _scoped(session, principal)
+    if arts.relationships.empty:
         return []
     done = {
-        r.rel_hash for r in session.query(RelationshipReview.rel_hash).all()
+        review.rel_hash
+        for review in session.query(RelationshipReview.rel_hash).all()
     }
     out = []
-    for _, r in a.relationships.iterrows():
-        src, tgt = str(r.get("source", "")), str(r.get("target", ""))
-        desc = str(r.get("description", ""))
+    for _, row in arts.relationships.iterrows():
+        src, tgt = str(row.get("source", "")), str(row.get("target", ""))
+        desc = str(row.get("description", ""))
         key = rel_key(src.upper(), tgt.upper(), desc)
         if key in done:
             continue
@@ -180,7 +237,7 @@ def review_queue(limit: int = 50, session: Session = Depends(get_session)):
                 source=src,
                 target=tgt,
                 description=desc[:500] or None,
-                weight=float(r.get("weight", 0) or 0),
+                weight=float(row.get("weight", 0) or 0),
             )
         )
         if len(out) >= limit:

@@ -85,7 +85,9 @@ class RAGState(TypedDict, total=False):
     k: int
     as_of: int | None
     allowed_doc_ids: set[str] | None
+    doc_scope: set[str] | None
     route: str
+    requested_route: str
     route_reason: str
     expanded: bool
     chunks: list[RetrievedChunk]
@@ -144,6 +146,17 @@ def build_rag_graph(
         route, reason = route_with_reason(
             state["question"], router_llm, state.get("mode")
         )
+        # Scoped callers can't run the engine's own composer over
+        # shared artifacts — it has no per-document authorization.
+        # Reroute to retrievers that enforce the caller's doc scope;
+        # requested_route records what the router/mode asked for.
+        if state.get("allowed_doc_ids") is not None and route in ("local", "global"):
+            rerouted = "traverse" if route == "local" else "hybrid"
+            return {
+                "route": rerouted,
+                "requested_route": route,
+                "route_reason": f"{reason}; scoped caller: {route}->{rerouted}",
+            }
         return {"route": route, "route_reason": reason}
 
     async def retrieve_node(state: RAGState) -> dict:
@@ -168,6 +181,13 @@ def build_rag_graph(
             return {"chunks": chunks}
 
         artifacts = load_artifacts()
+        # every graph consumer sees only artifacts provable from docs
+        # in the caller's scope — deleted docs are pruned the same way
+        scope = state.get("doc_scope")
+        if scope is not None:
+            from app.retrieval.artifacts import scope_artifacts
+
+            artifacts = scope_artifacts(artifacts, scope)
         if route == "traverse":
             from app.retrieval.review import load_rejections
             from app.retrieval.traverse import traverse
@@ -243,12 +263,29 @@ def build_rag_graph(
                 doc_ids=state.get("allowed_doc_ids"),
             )
 
+        scope = state.get("doc_scope")
+
+        def _arts():
+            """Artifacts scoped to the caller's live doc set — the same
+            provenance view retrieve_node used.
+
+            Author: venkateshwara doijode
+            """
+            from app.retrieval.artifacts import scope_artifacts
+
+            arts = load_artifacts()
+            return (
+                scope_artifacts(arts, scope)
+                if scope is not None
+                else arts
+            )
+
         def _traverse() -> list[RetrievedChunk]:
             from app.retrieval.review import load_rejections
             from app.retrieval.traverse import traverse
 
             return traverse(
-                state["question"], load_artifacts(), embedder,
+                state["question"], _arts(), embedder,
                 max_hops=k_hops, max_items=state["k"], router_llm=router_llm,
                 as_of=state.get("as_of"), rejections=load_rejections(),
                 allowed_doc_ids=state.get("allowed_doc_ids"),
@@ -257,7 +294,7 @@ def build_rag_graph(
         if not chunks:
             if route == "traverse":
                 return {"route": "hybrid", "chunks": _hybrid(), "expanded": True}
-            if load_artifacts().indexed:
+            if _arts().indexed:
                 t_chunks = _traverse()
                 if t_chunks:
                     return {
@@ -295,7 +332,7 @@ def build_rag_graph(
                     "chunks": alt_chunks,
                     "expanded": True,
                 }
-        elif load_artifacts().indexed:
+        elif _arts().indexed:
             alt_chunks = _traverse()
             if alt_chunks:
                 return {
@@ -388,21 +425,34 @@ def persist_turn(
     citations: list[dict],
     route_reason: str | None = None,
     metrics: dict | None = None,
+    owner_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> str:
     """Persist one chat turn and return the conversation id.
 
-    Resumes the given conversation when it exists, otherwise creates one —
-    a stale/unknown id silently starts fresh rather than erroring. Stores
-    the user message plus the assistant message with route + rationale +
-    citations + per-node latency/quality metrics.
+    Resumes the given conversation when it exists AND belongs to the
+    caller — a stale, unknown, or foreign-owned id silently starts
+    fresh rather than leaking history or appending to another user's
+    thread. Stores the user message plus the assistant message with
+    route + rationale + citations + per-node latency/quality metrics.
 
     Author: venkateshwara doijode
     """
     convo = session.get(Conversation, conversation_id) if conversation_id else None
+    if convo is not None:
+        # foreign-owned conversations are invisible; ownerless legacy
+        # rows are claimed by the first authenticated caller
+        if convo.owner_id is not None and convo.owner_id != owner_id:
+            convo = None
+        elif convo.tenant_id is not None and convo.tenant_id != tenant_id:
+            convo = None
     if convo is None:
-        convo = Conversation()
+        convo = Conversation(owner_id=owner_id, tenant_id=tenant_id)
         session.add(convo)
         session.flush()
+    elif convo.owner_id is None:
+        convo.owner_id = owner_id
+        convo.tenant_id = tenant_id
     session.add(Message(conversation_id=convo.id, role="user", content=question))
     session.add(
         Message(
@@ -427,11 +477,17 @@ def enrich_citations(session: Session, citations: list[dict]) -> list[dict]:
 
     Author: venkateshwara doijode
     """
-    doc_ids = {c["document_id"] for c in citations if c.get("document_id")}
+    doc_ids = {
+        citation["document_id"]
+        for citation in citations
+        if citation.get("document_id")
+    }
     titles = {
-        d.id: d.title
-        for d in session.query(Document).filter(Document.id.in_(doc_ids)).all()
+        doc.id: doc.title
+        for doc in session.query(Document)
+        .filter(Document.id.in_(doc_ids))
+        .all()
     } if doc_ids else {}
-    for c in citations:
-        c["document_title"] = titles.get(c.get("document_id"))
+    for citation in citations:
+        citation["document_title"] = titles.get(citation.get("document_id"))
     return citations

@@ -5,12 +5,16 @@ from pydantic import BaseModel, Field
 
 class DocumentOut(BaseModel):
     id: str
+    tenant_id: str | None = None
+    owner_id: str | None = None
+    department_id: str | None = None
+    course_id: str | None = None
+    classification: str = "internal"
     title: str
     filename: str
     mime: str
     status: str
     error: str | None = None
-    doc_group: str = "default"
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -52,6 +56,7 @@ class Citation(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     route: str
+    requested_route: str | None = None  # set when a scoped caller was rerouted
     route_reason: str | None = None
     warning: str | None = None
     conversation_id: str
@@ -63,6 +68,139 @@ class SourceOut(BaseModel):
     title: str
     filename: str
     text: str
+
+
+# --- multi-tenant administration -------------------------------------------
+
+
+class TenantIn(BaseModel):
+    slug: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=256)
+
+
+class TenantOut(BaseModel):
+    id: str
+    slug: str
+    name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserIn(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str = ""
+    role: str = "student"
+    tenant_id: str | None = None  # required unless actor is platform_admin w/ target tenant
+    department_id: str | None = None
+
+
+class UserPatch(BaseModel):
+    role: str | None = None
+    department_id: str | None = None
+    is_active: bool | None = None
+
+
+class UserOut(BaseModel):
+    id: str
+    tenant_id: str | None = None
+    email: str
+    display_name: str
+    role: str
+    department_id: str | None = None
+    is_active: bool
+    key_prefix: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserCreatedOut(UserOut):
+    """User row plus the raw API key — returned exactly once."""
+
+    api_key: str
+
+
+class RotateKeyOut(BaseModel):
+    api_key: str
+    key_prefix: str
+
+
+class DepartmentIn(BaseModel):
+    name: str = Field(min_length=1, max_length=256)
+
+
+class DepartmentOut(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CourseIn(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=512)
+    department_id: str
+
+
+class CourseOut(BaseModel):
+    id: str
+    tenant_id: str
+    department_id: str
+    code: str
+    title: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class EnrollmentIn(BaseModel):
+    user_id: str
+    course_id: str
+    kind: str = "student"  # student (enrollment) | instructor
+
+
+class EnrollmentOut(BaseModel):
+    id: str
+    user_id: str
+    course_id: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class GrantIn(BaseModel):
+    grantee_type: str  # user | role | department | course
+    grantee_id: str
+
+
+class GrantOut(BaseModel):
+    id: str
+    document_id: str
+    grantee_type: str
+    grantee_id: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuditEventOut(BaseModel):
+    id: str
+    tenant_id: str | None = None
+    user_id: str | None = None
+    action: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    decision: str | None = None
+    detail: dict | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --- graph ------------------------------------------------------------------
 
 
 class EntityOut(BaseModel):
@@ -87,6 +225,8 @@ class GraphStatsOut(BaseModel):
     text_units: int
     community_reports: int
     indexed: bool
+    stale: bool = False
+    stale_documents: int = 0
 
 
 class ReviewIn(BaseModel):

@@ -84,7 +84,7 @@ Rejected edges are excluded inside `build_graph`.
 
 ```mermaid
 flowchart TB
-    UP[POST /documents<br/>multipart + doc_group] --> EX[extract_text<br/>pdf/docx/txt/md]
+    UP[POST /documents<br/>multipart + classification/scope] --> EX[extract_text<br/>pdf/docx/txt/md]
     EX --> CH[chunk_text 3200/400] --> EM[embed_documents]
     EM --> LC[(LanceDB vectors<br/>+ incremental FTS)]
     EM --> SQ[(SQLite documents row)]
@@ -113,8 +113,10 @@ at a time (atomic reservation).
 1. `app/api/routers/documents.py::upload` — requires a write-capable
    key (`require_write`), reads the file, enforces `MAX_UPLOAD_BYTES`
    (413), calls `save_upload` → file lands in `data/uploads/`.
-2. A `Document` row is inserted (`status=uploaded`, `doc_group` from
-   the `?doc_group=` param, default `"default"`).
+2. A `Document` row is inserted (`status=uploaded`, `tenant_id`,
+   `owner_id`, `classification` from params — default `internal` — plus
+   optional `department_id`/`course_id` scope validated against the
+   caller's tenant and instructor rights).
 3. `app/ingestion/pipeline.py::process_document` runs inline:
    a. `extract.py::extract_text` — pdf/docx/txt/md → plain text.
       Failure → status `failed`, error stored, nothing else written.
@@ -207,8 +209,9 @@ Everything is env-driven via `.env` (see `.env.example`):
 | `LLM_BASE_URL` / `LLM_API_KEY` | — | OpenAI-compatible gateway |
 | `EMBEDDING_PROVIDER` / `_MODEL` / `_DIMS` | ST / MiniLM-L6-v2 / 384 | ONE provider shared by indexing, queries, and GraphRAG internals |
 | `TRAVERSE_K_HOPS` | 2 | hop-depth CAP (actual depth adapts to the question) |
-| `API_KEY` | — | admin key; unset = auth off (dev) |
-| `API_KEYS_JSON` | — | scoped keys `{"k": {"groups": ["faculty"], "write": false}}` |
+| `API_KEY` | — | break-glass platform-admin key; startup refuses missing (without `ALLOW_INSECURE_AUTH`) or weak values |
+| `ALLOW_INSECURE_AUTH` | `false` | opt-in unauthenticated local-dev mode |
+| `AUTH_FAIL_LIMIT_PER_MINUTE` | 10 | failed-key budget per client IP → `429` |
 | `MAX_UPLOAD_BYTES` | 25 MB | 413 when exceeded |
 | `LANGFUSE_*` | — | optional tracing (only if package installed) |
 | `GRAPHRAG_ROOT` | `data/graphrag` | settings.yaml + input/ + output/ + versions |
@@ -251,8 +254,9 @@ curl -X POST localhost:8000/chat -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-Response fields: `answer`, `route`, `route_reason`, `warning`
-(sources disagree), `conversation_id`, `citations[]` with
+Response fields: `answer`, `route`, `requested_route` (set when a
+scoped caller was rerouted off `local`/`global`), `route_reason`,
+`warning` (sources disagree), `conversation_id`, `citations[]` with
 `hop_path`, `edge_directions`, `alt_paths`, `score`, `years`,
 `supported`.
 
@@ -292,8 +296,9 @@ QA 3/3 correct with 3/3 gold citations.
   Answers show route + rationale caption, disagreement warnings,
   and citation expanders with score, hop-path graphviz diagram,
   alternate paths, years, `(unsupported)` badges.
-- **Documents** — upload (pdf/docx/txt/md) with optional title and
-  **Access group** field (RBAC); group-filtered document list.
+- **Documents** — upload (pdf/docx/txt/md) with optional title,
+  classification (`internal`/`public`/`restricted`), and
+  department/course scope pickers; ACL-filtered document list.
 - **Graph Index** — index stats, `Run GraphRAG index` button, job
   history with per-workflow status; **interactive subgraph explorer**
   (pick an entity, set depth, renders the neighborhood as a graph).
@@ -304,12 +309,29 @@ QA 3/3 correct with 3/3 gold citations.
 
 ## 6. Security model
 
-- `X-API-Key: $API_KEY` on every route except `/healthz`+`/readyz`.
-- `API_KEYS_JSON` grants scoped principals: `groups` limits which
-  `doc_group` documents are readable (list/get/source/chat/retrieval);
-  `write:false` → 403 on upload, delete, ingest, review.
-- Out-of-group documents 404 (existence not disclosed).
-- Uploads capped by `MAX_UPLOAD_BYTES`.
+- `X-API-Key` on every route except `/healthz`+`/readyz`. Per-user
+  keys live sha256-hashed in `users` (raw key shown once at
+  issuance/rotation); the env `API_KEY` is the break-glass platform
+  admin. Failed attempts are rate-limited per IP (429).
+- Tenants are the hard isolation boundary — no grant crosses them.
+  Access order (`app/authz.py`): tenant → admin → owner → explicit
+  grant → restricted deny → department/course scope → classification
+  default → deny. Grants are additive allow-only.
+- Unauthorized documents 404 (existence not disclosed) on every route —
+  list/get/source/chat/graph endpoints share the same `doc_scope`.
+- Scoped callers are rerouted off the GraphRAG composers
+  (`local`→traverse, `global`→hybrid); GraphRAG artifacts are only
+  exposed through strict-provenance views (an aggregate is dropped
+  unless *all* supporting text units are authorized).
+- Deleted documents are unreachable immediately, even before a graph
+  rebuild and even if the rebuild fails — artifact reads prune any doc
+  id not in the live `documents` table; `/graph/stats.stale` flags the
+  leftover parquet rows until reindex.
+- Role-management APIs enforce an anti-escalation matrix (no
+  self-promotion, no cross-tenant admin, platform admin only from
+  platform admins, enrollments need hod+).
+- Uploads capped by `MAX_UPLOAD_BYTES`. Schema evolves only through
+  Alembic migrations with a sqlite file backup first.
 
 ---
 
@@ -318,11 +340,11 @@ QA 3/3 correct with 3/3 gold citations.
 | Symptom | Cause / fix |
 |---|---|
 | `nest_asyncio` / loop errors | uvicorn must run `--loop asyncio` |
-| `no such column` on startup | old DB — `init_db` syncs new columns automatically at next start |
+| `no such column` on startup | old DB — Alembic migrations run at startup (`init_db` → `alembic upgrade head`, sqlite backup first) |
 | traverse returns little | graph not built or small — check `/graph/stats` text_units; traverse is bounded by extracted text units |
 | workflow `generate_text_embeddings` failed | `vector_size` mismatch — `EMBEDDING_DIMS` must equal model dims |
-| 401s | set `API_KEY` client-side or use a scoped key from `API_KEYS_JSON` |
-| 403s | key has `write:false` — use admin `API_KEY` for mutations |
+| 401s | set `API_KEY` client-side or a user's key from `POST /users`; revoked/deactivated keys 401 immediately |
+| 403s | role lacks write/admin rights for the endpoint (e.g. student on `POST /documents`, non-admin on `PATCH /users`) |
 
 ## 8. Tests / CI
 

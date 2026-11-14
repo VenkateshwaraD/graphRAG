@@ -24,6 +24,7 @@ dependencies = [
     "streamlit>=1.36",
     "graphrag>=2.0",
     "tenacity>=8.4",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]

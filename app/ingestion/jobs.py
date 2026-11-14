@@ -29,6 +29,13 @@ def create_job(session: Session) -> IngestionJob:
 
 _reserve_lock = threading.Lock()
 
+# Serializes destructive corpus mutations (document deletion, index
+# builds) within this process. Held by ``delete_document`` and by the
+# tail end of ``run_index_job`` when the artifact cache is refreshed,
+# so a delete can't land between a build's parquet write and cache
+# swap in a way that leaves stale rows visible.
+mutation_lock = threading.RLock()
+
 
 def try_reserve_job(session: Session, update: bool = False) -> IngestionJob | None:
     """Atomically check for a live job and launch a new one if free.
@@ -93,7 +100,8 @@ def run_index_job(job_id: str, update: bool = False) -> None:
         stats = asyncio.run(build_graph_index(update=update))
         from app.retrieval.artifacts import load_artifacts
 
-        load_artifacts(refresh=True)
+        with mutation_lock:
+            load_artifacts(refresh=True)
         _set(
             session,
             job_id,
@@ -118,8 +126,8 @@ def launch_index_job(job_id: str, update: bool = False) -> threading.Thread:
 
     Author: venkateshwara doijode
     """
-    t = threading.Thread(
+    thread = threading.Thread(
         target=run_index_job, args=(job_id,), kwargs={"update": update}, daemon=True
     )
-    t.start()
-    return t
+    thread.start()
+    return thread

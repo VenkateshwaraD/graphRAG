@@ -3,8 +3,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
-from app.api.deps import require_api_key, warn_if_auth_disabled
-from app.api.routers import chat, documents, graph, health, ingestion, sources
+from app.api.deps import check_bootstrap_auth, require_api_key
+from app.api.routers import (
+    audit,
+    catalog,
+    chat,
+    documents,
+    graph,
+    health,
+    ingestion,
+    sources,
+    tenants,
+    users,
+)
 from app.db.session import init_db
 from app.ingestion.graph_index import ensure_settings
 
@@ -13,13 +24,14 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """App startup: create DB tables and generate GraphRAG settings.yaml.
+    """App startup: run migrations, generate GraphRAG settings.yaml, and
+    verify bootstrap credentials aren't insecure defaults.
 
     Author: venkateshwara doijode
     """
     init_db()
     ensure_settings()
-    warn_if_auth_disabled()
+    check_bootstrap_auth()
     yield
 
 
@@ -33,3 +45,7 @@ app.include_router(ingestion.router, dependencies=protected)
 app.include_router(chat.router, dependencies=protected)
 app.include_router(sources.router, dependencies=protected)
 app.include_router(graph.router, dependencies=protected)
+app.include_router(tenants.router, dependencies=protected)
+app.include_router(users.router, dependencies=protected)
+app.include_router(catalog.router, dependencies=protected)
+app.include_router(audit.router, dependencies=protected)

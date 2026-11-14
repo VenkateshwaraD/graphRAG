@@ -1,0 +1,94 @@
+=== ruff check ===
+All checks passed!
+
+=== pytest -v ===
+configfile: pyproject.toml
+testpaths: tests
+plugins: langsmith-0.14.17, anyio-4.16.0
+collecting ... collected 70 items
+
+tests/test_api.py::test_health PASSED                                    [  1%]
+tests/test_api.py::test_upload_and_chat_and_source PASSED                [  2%]
+tests/test_api.py::test_upload_bad_type PASSED                           [  4%]
+tests/test_api.py::test_chat_invalid_mode PASSED                         [  5%]
+tests/test_api.py::test_missing_source PASSED                            [  7%]
+tests/test_api.py::test_auth_required PASSED                             [  8%]
+tests/test_api.py::test_health_open_without_key PASSED                   [ 10%]
+tests/test_api.py::test_upload_size_limit PASSED                         [ 11%]
+tests/test_api.py::test_review_flow PASSED                               [ 12%]
+tests/test_api.py::test_review_queue_and_subgraph_empty_index PASSED     [ 14%]
+tests/test_chunker.py::test_short_text_single_chunk PASSED               [ 15%]
+tests/test_chunker.py::test_long_text_splits_on_boundaries PASSED        [ 17%]
+tests/test_chunker.py::test_empty_text PASSED                            [ 18%]
+tests/test_chunker.py::test_overlap_carries_tail PASSED                  [ 20%]
+tests/test_hybrid.py::test_vector_search_retrieves_relevant PASSED       [ 21%]
+tests/test_hybrid.py::test_fts_search_matches_keywords PASSED            [ 22%]
+tests/test_hybrid.py::test_stale_embedding_model_excluded PASSED         [ 24%]
+tests/test_migrations.py::test_fresh_upgrade_creates_schema PASSED       [ 25%]
+tests/test_migrations.py::test_legacy_upgrade_backfills_tenant PASSED    [ 27%]
+tests/test_migrations.py::test_downgrade_restores_legacy_shape PASSED    [ 28%]
+tests/test_migrations.py::test_upgrade_is_idempotent PASSED              [ 30%]
+tests/test_pipeline.py::test_failed_ingest_removes_staged_file PASSED    [ 31%]
+tests/test_pipeline.py::test_failed_ingest_clears_vector_rows PASSED     [ 32%]
+tests/test_pipeline.py::test_success_ingest_stages_file PASSED           [ 34%]
+tests/test_rbac_validate.py::test_student_accesses_own_course_document PASSED [ 35%]
+tests/test_rbac_validate.py::test_student_denied_other_course_document PASSED [ 37%]
+tests/test_rbac_validate.py::test_faculty_denied_other_department PASSED [ 38%]
+tests/test_rbac_validate.py::test_cross_tenant_access_denied PASSED      [ 40%]
+tests/test_rbac_validate.py::test_restricted_grant_lifecycle PASSED      [ 41%]
+tests/test_rbac_validate.py::test_grant_cannot_cross_tenant PASSED       [ 42%]
+tests/test_rbac_validate.py::test_empty_scope_fails_closed PASSED        [ 44%]
+tests/test_rbac_validate.py::test_student_cannot_self_promote PASSED     [ 45%]
+tests/test_rbac_validate.py::test_admin_cannot_self_change_role PASSED   [ 47%]
+tests/test_rbac_validate.py::test_uni_admin_role_ceiling PASSED          [ 48%]
+tests/test_rbac_validate.py::test_student_cannot_enroll_self PASSED      [ 50%]
+tests/test_rbac_validate.py::test_key_rotation_revokes_old_key PASSED    [ 51%]
+tests/test_rbac_validate.py::test_deactivated_user_key_fails PASSED      [ 52%]
+tests/test_rbac_validate.py::test_wrong_and_missing_keys_still_401 PASSED [ 54%]
+tests/test_rbac_validate.py::test_scoped_caller_rerouted_off_local PASSED [ 55%]
+tests/test_rbac_validate.py::test_chat_excludes_out_of_scope_context PASSED [ 57%]
+tests/test_rbac_validate.py::test_chat_response_shape PASSED             [ 58%]
+tests/test_rbac_validate.py::test_scope_artifacts_strict_provenance PASSED [ 60%]
+tests/test_rbac_validate.py::test_stale_doc_ids_detects_deleted PASSED   [ 61%]
+tests/test_rbac_validate.py::test_validate_parses_verdicts PASSED        [ 62%]
+tests/test_rbac_validate.py::test_validate_degrades_on_llm_failure PASSED [ 64%]
+tests/test_rbac_validate.py::test_traverse_allowed_doc_ids PASSED        [ 65%]
+tests/test_rbac_validate.py::test_graph_index_version_and_restore PASSED [ 67%]
+tests/test_rbac_validate.py::test_langfuse_handler_none_without_package PASSED [ 68%]
+tests/test_router.py::test_override_valid PASSED                         [ 70%]
+tests/test_router.py::test_override_invalid PASSED                       [ 71%]
+tests/test_router.py::test_llm_route_parsed PASSED                       [ 72%]
+tests/test_router.py::test_llm_verbose_answer_tolerated PASSED           [ 74%]
+tests/test_router.py::test_default_fallback PASSED                       [ 75%]
+tests/test_router.py::test_first_token_by_position_wins PASSED           [ 77%]
+tests/test_router.py::test_word_boundary_blocks_substring PASSED         [ 78%]
+tests/test_router.py::test_route_with_reason PASSED                      [ 80%]
+tests/test_traverse.py::test_build_graph PASSED                          [ 81%]
+tests/test_traverse.py::test_link_entities_exact PASSED                  [ 82%]
+tests/test_traverse.py::test_decompose_no_llm PASSED                     [ 84%]
+tests/test_traverse.py::test_traverse_two_hops PASSED                    [ 85%]
+tests/test_traverse.py::test_traverse_respects_hop_limit PASSED          [ 87%]
+tests/test_traverse.py::test_traverse_empty_graph PASSED                 [ 88%]
+tests/test_traverse.py::test_traverse_no_cycles PASSED                   [ 90%]
+tests/test_traverse.py::test_traverse_scores_and_provenance PASSED       [ 91%]
+tests/test_traverse.py::test_traverse_early_stop PASSED                  [ 92%]
+tests/test_traverse.py::test_traverse_as_of_penalizes_future PASSED      [ 94%]
+tests/test_traverse.py::test_traverse_recency_prefers_latest PASSED      [ 95%]
+tests/test_traverse.py::test_traverse_rejected_edge_excluded PASSED      [ 97%]
+tests/test_traverse.py::test_traverse_alternate_paths PASSED             [ 98%]
+tests/test_traverse.py::test_traverse_prunes_weak_evidence PASSED        [100%]
+
+=============================== warnings summary ===============================
+tests/test_api.py: 10 warnings
+tests/test_pipeline.py: 3 warnings
+tests/test_rbac_validate.py: 18 warnings
+  /home/ubuntu/Desktop/UC5_agent/.venv/lib/python3.12/site-packages/alembic/config.py:604: DeprecationWarning: No path_separator found in configuration; falling back to legacy splitting on spaces, commas, and colons for prepend_sys_path.  Consider adding path_separator=os to Alembic config.
+    util.warn_deprecated(
+
+tests/test_api.py::test_health
+tests/test_api.py::test_health
+  /home/ubuntu/Desktop/UC5_agent/.venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:1192: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 70 passed, 33 warnings in 16.68s =======================

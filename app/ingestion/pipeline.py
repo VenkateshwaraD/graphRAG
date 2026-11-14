@@ -123,13 +123,34 @@ def delete_document(session: Session, document: Document) -> None:
     """Remove a document from every store it touched.
 
     Deletes its LanceDB chunk rows, the staged GraphRAG input file, the
-    stored upload, and the ORM row (chunks cascade).
+    stored upload, and the ORM row (chunks cascade), then invalidates
+    the artifact cache. Graph parquets are NOT rewritten — the deleted
+    doc's entities/relationships/text units physically remain until the
+    next build, but they can never surface: ``doc_scope`` derives the
+    allowed set from live ``Document`` rows, so every artifact read
+    prunes them whether or not a rebuild has run (or has failed).
+
+    Runs under ``mutation_lock`` so the ORM row and every side store
+    disappear atomically with respect to concurrent index-job cache
+    swaps. Deleting the DB row last would leave a window where the doc
+    is authorized but its chunks are gone; deleting it inside the lock
+    closes that race instead.
 
     Author: venkateshwara doijode
     """
-    get_vector_store().delete_document(document.id)
-    staged = get_settings().graphrag_root / "input" / f"{document.id}.txt"
-    staged.unlink(missing_ok=True)
-    Path(document.storage_path).unlink(missing_ok=True)
-    session.delete(document)
-    session.commit()
+    from app.ingestion.jobs import mutation_lock
+    from app.retrieval.artifacts import load_artifacts
+
+    doc_id = document.id
+    with mutation_lock:
+        get_vector_store().delete_document(doc_id)
+        staged = get_settings().graphrag_root / "input" / f"{doc_id}.txt"
+        staged.unlink(missing_ok=True)
+        Path(document.storage_path).unlink(missing_ok=True)
+        session.delete(document)
+        session.commit()
+        # Parquet mtimes don't change on delete, so the mtime signature
+        # won't bust the cache — drop it explicitly. Not strictly
+        # required for safety (scope filtering already prunes dead
+        # doc ids) but keeps memory bounded and staleness checks honest.
+        load_artifacts(refresh=True)

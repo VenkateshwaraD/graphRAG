@@ -13,7 +13,7 @@
 ## Environment quirks (this machine)
 
 - `API_KEY` env → `X-API-Key` required on every route except `/healthz`+`/readyz`; unset = auth disabled. Clients (seed.py, eval_qa.py, streamlit_app) read `API_KEY` and send the header; tests set `API_KEY=test-api-key` in conftest.
-- `API_KEYS_JSON` adds scoped principals `{"k": {"groups": [...], "write": bool}}` — group-filtered reads, `write=false` → 403 on mutations. `Document.doc_group` scopes documents.
+- Auth is per-user hashed API keys + role/tenant/ACL authorization (`app/authz.py`); `API_KEY` env = break-glass platform admin. `ALLOW_INSECURE_AUTH=true` runs unauthenticated for local dev only (startup refuses a missing/weak API_KEY otherwise). Legacy `doc_group`/`API_KEYS_JSON` are replaced by the Alembic-managed schema in `migrations/`.
 - `MAX_UPLOAD_BYTES` caps `POST /documents` (413 when exceeded; default 25 MB).
 - Langfuse is NOT installed — `app/observability.py` no-ops unless package + `LANGFUSE_*` keys are present. Per-node timings land on `Message.metrics` regardless.
 

@@ -57,12 +57,14 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    # X-API-Key required on every route except health probes.
-    # Empty disables auth (local dev).
+    # X-API-Key required on every route except health probes. The env
+    # API_KEY is the break-glass platform-admin credential; per-user
+    # keys live in the users table. Startup refuses a missing or weak
+    # API_KEY unless allow_insecure_auth opts in (local dev only).
     api_key: str = ""
-    # Scoped keys: {"key": {"groups": ["faculty"], "write": false}} —
-    # each grants read access to the named doc groups (["*"] = all).
-    api_keys_json: str = ""
+    allow_insecure_auth: bool = False
+    # failed-key attempts allowed per client IP per minute before 429
+    auth_fail_limit_per_minute: int = 10
     # Optional Langfuse tracing — enabled only when the package is
     # installed AND both keys are set.
     langfuse_public_key: str = ""

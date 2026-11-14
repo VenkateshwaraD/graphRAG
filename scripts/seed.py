@@ -18,10 +18,78 @@ sys.path.insert(0, str(ROOT))
 CORPUS = ROOT / "seed_corpus"
 
 
+def _bootstrap_demo(api: str, headers: dict) -> str | None:
+    """Create a demo tenant + department + course + student user.
+
+    Idempotent-ish: reuses an existing 'demo' tenant when present.
+    Returns the tenant id so uploads land inside it (visible to the
+    demo users, not just the platform admin).
+
+    Author: venkateshwara doijode
+    """
+    import httpx
+
+    tenants = httpx.get(f"{api}/tenants", headers=headers, timeout=30)
+    tenant_id = None
+    if tenants.is_success:
+        for tenant in tenants.json():
+            if tenant["slug"] == "demo":
+                tenant_id = tenant["id"]
+    if tenant_id is None:
+        created = httpx.post(
+            f"{api}/tenants",
+            json={"slug": "demo", "name": "Demo University"},
+            headers=headers,
+            timeout=30,
+        )
+        if not created.is_success:
+            print("tenant bootstrap failed:", created.status_code, created.text)
+            return None
+        tenant_id = created.json()["id"]
+
+    dept = httpx.post(
+        f"{api}/departments",
+        json={"name": "Computer Science"},
+        params={"tenant_id": tenant_id},
+        headers=headers,
+        timeout=30,
+    )
+    dept_id = dept.json()["id"] if dept.is_success else None
+    if dept_id:
+        httpx.post(
+            f"{api}/courses",
+            json={
+                "code": "CS-501",
+                "title": "Data Systems",
+                "department_id": dept_id,
+            },
+            headers=headers,
+            timeout=30,
+        )
+    user = httpx.post(
+        f"{api}/users",
+        json={
+            "email": "student@demo.edu",
+            "display_name": "Demo Student",
+            "role": "student",
+            "tenant_id": tenant_id,
+            "department_id": dept_id,
+        },
+        headers=headers,
+        timeout=30,
+    )
+    if user.is_success:
+        print("demo student key:", user.json()["api_key"])
+    return tenant_id
+
+
 def seed_via_api(api: str) -> None:
-    """Upload every seed_corpus/*.txt through a running API's /documents.
+    """Bootstrap the demo tenant and upload every seed_corpus/*.txt
+    through a running API's /documents.
 
     Sends the API_KEY env var as X-API-Key when the server has auth on.
+    Documents land in the demo tenant as public so tenant users can
+    retrieve them.
 
     Author: venkateshwara doijode
     """
@@ -30,15 +98,22 @@ def seed_via_api(api: str) -> None:
     import httpx
 
     headers = {"X-API-Key": os.environ["API_KEY"]} if os.environ.get("API_KEY") else {}
-    for f in sorted(CORPUS.glob("*.txt")):
-        r = httpx.post(
+    tenant_id = _bootstrap_demo(api, headers)
+    for src_file in sorted(CORPUS.glob("*.txt")):
+        params = {"title": src_file.stem, "classification": "public"}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        result = httpx.post(
             f"{api}/documents",
-            files={"file": (f.name, f.read_bytes())},
-            params={"title": f.stem},
+            files={"file": (src_file.name, src_file.read_bytes())},
+            params=params,
             headers=headers,
             timeout=300,
         )
-        print(f.name, "->", r.status_code, r.json().get("status") if r.is_success else r.text)
+        print(
+            src_file.name, "->", result.status_code,
+            result.json().get("status") if result.is_success else result.text,
+        )
 
 
 def seed_direct() -> None:
@@ -48,25 +123,32 @@ def seed_direct() -> None:
 
     Author: venkateshwara doijode
     """
-    from app.db.models import DocStatus, Document
+    from app.db.models import DocStatus, Document, Tenant
     from app.db.session import SessionLocal, init_db
     from app.ingestion.pipeline import process_document
 
     init_db()
     session = SessionLocal()
     try:
-        for f in sorted(CORPUS.glob("*.txt")):
+        tenant = session.query(Tenant).filter_by(slug="demo").first()
+        if tenant is None:
+            tenant = Tenant(slug="demo", name="Demo University")
+            session.add(tenant)
+            session.commit()
+        for src_file in sorted(CORPUS.glob("*.txt")):
             doc = Document(
-                title=f.stem,
-                filename=f.name,
+                title=src_file.stem,
+                filename=src_file.name,
                 mime="text/plain",
-                storage_path=str(f),
+                storage_path=str(src_file),
                 status=DocStatus.UPLOADED.value,
+                tenant_id=tenant.id,
+                classification="public",
             )
             session.add(doc)
             session.commit()
-            n = process_document(session, doc)
-            print(f.name, "->", doc.status, f"({n} chunks)")
+            n_chunks = process_document(session, doc)
+            print(src_file.name, "->", doc.status, f"({n_chunks} chunks)")
     finally:
         session.close()
 

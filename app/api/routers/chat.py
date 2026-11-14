@@ -4,27 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import ApiPrincipal, get_graph, require_api_key
-from app.db.models import Document
+from app.audit import record_audit
+from app.authz import doc_scope, unrestricted
 from app.db.session import get_session
 from app.rag.graph import enrich_citations, persist_turn
 from app.schemas import ChatRequest, ChatResponse, Citation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["chat"])
-
-
-def _allowed_doc_ids(session: Session, principal: ApiPrincipal) -> set[str] | None:
-    """Documents the caller's groups may see; ``None`` = unrestricted.
-
-    Author: venkateshwara doijode
-    """
-    if principal.groups is None:
-        return None
-    return {
-        d.id
-        for d in session.query(Document.id)
-        .filter(Document.doc_group.in_(sorted(principal.groups)))
-    }
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -38,14 +25,21 @@ async def chat(
     Runs route -> retrieve -> assess -> generate. ``mode`` forces a
     retriever (invalid values -> 400); ``as_of`` scopes traverse evidence
     to relationships valid by that year; any workflow/provider failure
-    becomes a 502 with the error surfaced. Retrieval is restricted to
-    documents in the caller's groups (RBAC); out-of-group citations are
-    dropped. The turn is persisted for conversation history and
-    citations are enriched with document titles.
+    becomes a 502 with the error surfaced. Retrieval and graph context
+    are restricted to documents the caller's identity may see — scoped
+    callers are rerouted off the GraphRAG composer routes
+    (``local``/``global``) which cannot enforce per-document
+    authorization, and the substitution is reported via
+    ``requested_route``. Out-of-scope citations are dropped and the turn
+    persisted for conversation history.
 
     Author: venkateshwara doijode
     """
-    allowed = _allowed_doc_ids(session, principal)
+    # concrete live doc set the caller may see — never None; the graph
+    # also receives allowed_doc_ids (None iff unrestricted) to decide
+    # whether the composer routes are permitted at all.
+    scope = doc_scope(session, principal)
+    allowed = None if unrestricted(principal) else scope
     from app.observability import langfuse_handler
 
     cb = langfuse_handler(tags=["chat"])
@@ -58,6 +52,7 @@ async def chat(
                 "k": req.k,
                 "as_of": req.as_of,
                 "allowed_doc_ids": allowed,
+                "doc_scope": scope,
             },
             config=config,
         )
@@ -72,22 +67,43 @@ async def chat(
     route_reason = result.get("route_reason")
     citations = enrich_citations(session, result.get("citations") or [])
     if allowed is not None:
-        # local/global citations bypass doc-scoped retrieval — drop any
-        # pointing at documents outside the caller's groups.
+        # residual guard: engine-produced citations can't point outside
+        # the caller's document set
         citations = [
-            c for c in citations
-            if not c.get("document_id") or c["document_id"] in allowed
+            citation
+            for citation in citations
+            if not citation.get("document_id")
+            or citation["document_id"] in allowed
         ]
+    # a document deleted mid-request must not linger as a citation —
+    # unresolved document_ids (no live Document row) are dropped
+    citations = [
+        citation
+        for citation in citations
+        if not citation.get("document_id") or citation.get("document_title")
+    ]
     convo_id = persist_turn(
         session, req.conversation_id, req.question, answer, route, citations,
         route_reason=route_reason,
         metrics=result.get("metrics"),
+        owner_id=principal.user_id,
+        tenant_id=principal.tenant_id,
+    )
+    record_audit(
+        session,
+        action="chat.ask",
+        principal=principal,
+        resource_type="conversation",
+        resource_id=convo_id,
+        decision="allow",
+        detail={"route": route},
     )
     return ChatResponse(
         answer=answer,
         route=route,
+        requested_route=result.get("requested_route"),
         route_reason=route_reason,
         warning=result.get("warning"),
         conversation_id=convo_id,
-        citations=[Citation(**c) for c in citations],
+        citations=[Citation(**citation) for citation in citations],
     )

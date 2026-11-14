@@ -6,8 +6,8 @@ def test_health(client):
 
     Author: venkateshwara doijode
     """
-    r = client.get("/healthz")
-    assert r.status_code == 200 and r.json()["status"] == "ok"
+    response = client.get("/healthz")
+    assert response.status_code == 200 and response.json()["status"] == "ok"
 
 
 def test_upload_and_chat_and_source(client):
@@ -15,27 +15,27 @@ def test_upload_and_chat_and_source(client):
 
     Author: venkateshwara doijode
     """
-    r = client.post(
+    response = client.post(
         "/documents",
         files={"file": ("notes.txt", b"CS-501 is taught by Dr. Priya Raman in Turing Hall.")},
         params={"title": "notes"},
     )
-    assert r.status_code == 201, r.text
-    doc = r.json()
+    assert response.status_code == 201, response.text
+    doc = response.json()
     assert doc["status"] == "chunked"
 
-    r = client.post("/chat", json={"question": "who teaches CS-501?"})
-    assert r.status_code == 200, r.text
-    data = r.json()
+    response = client.post("/chat", json={"question": "who teaches CS-501?"})
+    assert response.status_code == 200, response.text
+    data = response.json()
     assert data["route"] in {"hybrid", "traverse", "local", "global"}
     assert data["route_reason"] is not None
     assert data["conversation_id"]
     assert data["citations"] and data["citations"][0]["document_id"] == doc["id"]
     assert data["citations"][0]["score"] is not None
 
-    r = client.get(f"/sources/{doc['id']}")
-    assert r.status_code == 200
-    assert "Priya Raman" in r.json()["text"]
+    response = client.get(f"/sources/{doc['id']}")
+    assert response.status_code == 200
+    assert "Priya Raman" in response.json()["text"]
 
 
 def test_upload_bad_type(client):
@@ -43,12 +43,12 @@ def test_upload_bad_type(client):
 
     Author: venkateshwara doijode
     """
-    r = client.post(
+    response = client.post(
         "/documents",
         files={"file": ("x.exe", b"MZ binary")},
     )
-    assert r.status_code == 201
-    assert r.json()["status"] == "failed"  # extraction fails, recorded not raised
+    assert response.status_code == 201
+    assert response.json()["status"] == "failed"  # extraction fails, recorded not raised
 
 
 def test_chat_invalid_mode(client):
@@ -56,8 +56,8 @@ def test_chat_invalid_mode(client):
 
     Author: venkateshwara doijode
     """
-    r = client.post("/chat", json={"question": "hi", "mode": "bogus"})
-    assert r.status_code == 400
+    response = client.post("/chat", json={"question": "hi", "mode": "bogus"})
+    assert response.status_code == 400
 
 
 def test_missing_source(client):
@@ -73,10 +73,10 @@ def test_auth_required(client):
 
     Author: venkateshwara doijode
     """
-    r = client.get("/documents", headers={"X-API-Key": "wrong"})
-    assert r.status_code == 401
-    r = client.post("/chat", json={"question": "hi"}, headers={"X-API-Key": ""})
-    assert r.status_code == 401
+    response = client.get("/documents", headers={"X-API-Key": "wrong"})
+    assert response.status_code == 401
+    response = client.post("/chat", json={"question": "hi"}, headers={"X-API-Key": ""})
+    assert response.status_code == 401
 
 
 def test_health_open_without_key(client):
@@ -100,11 +100,11 @@ def test_upload_size_limit(client, monkeypatch):
     from app.config import get_settings
 
     monkeypatch.setattr(get_settings(), "max_upload_bytes", 16)
-    r = client.post(
+    response = client.post(
         "/documents",
         files={"file": ("big.txt", b"x" * 64)},
     )
-    assert r.status_code == 413
+    assert response.status_code == 413
 
 
 def test_review_flow(client):
@@ -113,7 +113,7 @@ def test_review_flow(client):
 
     Author: venkateshwara doijode
     """
-    r = client.post(
+    response = client.post(
         "/graph/review",
         json={
             "source": "CS-501",
@@ -123,16 +123,18 @@ def test_review_flow(client):
             "note": "wrong extraction",
         },
     )
-    assert r.status_code == 201, r.text
-    body = r.json()
+    assert response.status_code == 201, response.text
+    body = response.json()
     assert body["verdict"] == "rejected" and body["rel_hash"]
 
-    r = client.get("/graph/review")
-    assert r.status_code == 200
-    assert any(x["rel_hash"] == body["rel_hash"] for x in r.json())
+    response = client.get("/graph/review")
+    assert response.status_code == 200
+    assert any(
+        row["rel_hash"] == body["rel_hash"] for row in response.json()
+    )
 
     # same relationship re-posted updates rather than duplicates
-    r = client.post(
+    response = client.post(
         "/graph/review",
         json={
             "source": "CS-501",
@@ -141,10 +143,10 @@ def test_review_flow(client):
             "verdict": "approved",
         },
     )
-    assert r.status_code == 201
-    assert r.json()["verdict"] == "approved"
+    assert response.status_code == 201
+    assert response.json()["verdict"] == "approved"
     rows = client.get("/graph/review").json()
-    assert sum(1 for x in rows if x["rel_hash"] == body["rel_hash"]) == 1
+    assert sum(1 for row in rows if row["rel_hash"] == body["rel_hash"]) == 1
 
 
 def test_review_queue_and_subgraph_empty_index(client):
@@ -154,5 +156,5 @@ def test_review_queue_and_subgraph_empty_index(client):
     Author: venkateshwara doijode
     """
     assert client.get("/graph/review/queue").json() == []
-    r = client.get("/graph/subgraph/NOPE")
-    assert r.status_code == 404
+    response = client.get("/graph/subgraph/NOPE")
+    assert response.status_code == 404

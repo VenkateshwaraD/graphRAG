@@ -1,104 +1,446 @@
-"""RBAC scoped keys, citation validation, doc-scoped retrieval, metrics.
+"""Authorization acceptance matrix + retrieval/citation unit tests.
+
+Covers the six roles, multi-tenant isolation, grants and revocation,
+privilege-escalation guards, scoped rerouting, API-key rotation, and
+fail-closed empty scopes — all offline (fake LLM, hash embedder).
 
 Author: venkateshwara doijode
 """
 
 from __future__ import annotations
 
-import pytest
-
-from app.config import get_settings
-
-SCOPED = {
-    "reader-key": {"groups": ["faculty"], "write": False},
-    "writer-key": {"groups": ["faculty"], "write": True},
-    "other-key": {"groups": ["library"], "write": True},
-}
+import pytest  # noqa: F401 — fixtures surface via pytest, not direct refs
+from conftest import auth
 
 
-@pytest.fixture
-def scoped_keys(monkeypatch):
-    """Enable scoped keys alongside the admin test key."""
-    import json
+def _upload(client, content=b"some course material", **params):
+    """Upload as the platform-admin test key; returns the doc dict.
 
-    monkeypatch.setattr(
-        get_settings(), "api_keys_json", json.dumps(SCOPED)
-    )
-    yield
-
-
-def _upload(client, content=b"secret faculty notes", group="faculty"):
-    r = client.post(
+    Author: venkateshwara doijode
+    """
+    response = client.post(
         "/documents",
         files={"file": ("doc.txt", content)},
-        params={"doc_group": group},
+        params=params,
     )
-    assert r.status_code == 201, r.text
-    return r.json()
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
-def test_scoped_key_filters_documents(client, scoped_keys):
-    """A faculty key sees faculty docs only; other groups 404/hidden."""
-    doc = _upload(client)
+# --- document access matrix --------------------------------------------------
 
-    h = {"X-API-Key": "reader-key"}
-    ids = {d["id"] for d in client.get("/documents", headers=h).json()}
+
+def test_student_accesses_own_course_document(client, world):
+    """Enrolled student reads a course-scoped document — ALLOW."""
+    doc = _upload(
+        client,
+        tenant_id=world["tenant_a"],
+        course_id=world["course_501"],
+        classification="public",
+    )
+    response = client.get(f"/documents/{doc['id']}", headers=auth(world, "student"))
+    assert response.status_code == 200
+    ids = {
+        listed["id"]
+        for listed in client.get("/documents", headers=auth(world, "student")).json()
+    }
     assert doc["id"] in ids
-    assert client.get(f"/documents/{doc['id']}", headers=h).status_code == 200
-    assert client.get(f"/sources/{doc['id']}", headers=h).status_code == 200
 
-    h2 = {"X-API-Key": "other-key"}
-    ids = {d["id"] for d in client.get("/documents", headers=h2).json()}
+
+def test_student_denied_other_course_document(client, world):
+    """A student not enrolled in the document's course — DENY."""
+    doc = _upload(
+        client,
+        tenant_id=world["tenant_a"],
+        course_id=world["course_501"],
+        classification="public",
+    )
+    response = client.get(f"/documents/{doc['id']}", headers=auth(world, "outsider"))
+    assert response.status_code == 404
+    assert client.get(
+        f"/sources/{doc['id']}", headers=auth(world, "outsider")
+    ).status_code == 404
+
+
+def test_faculty_denied_other_department(client, world):
+    """A department-scoped doc is invisible outside that department."""
+    doc = _upload(
+        client,
+        tenant_id=world["tenant_a"],
+        department_id=world["dept_cs"],
+        classification="internal",
+    )
+    assert (
+        client.get(f"/documents/{doc['id']}", headers=auth(world, "faculty"))
+        .status_code
+        == 200
+    )
+    # outsider is a student of the law department — cross-department deny
+    assert (
+        client.get(f"/documents/{doc['id']}", headers=auth(world, "outsider"))
+        .status_code
+        == 404
+    )
+
+
+def test_cross_tenant_access_denied(client, world):
+    """Tenant B's admin cannot see tenant A's documents — DENY."""
+    doc = _upload(
+        client, tenant_id=world["tenant_a"], classification="public"
+    )
+    response = client.get(f"/documents/{doc['id']}", headers=auth(world, "admin_b"))
+    assert response.status_code == 404
+    assert client.get(
+        f"/sources/{doc['id']}", headers=auth(world, "admin_b")
+    ).status_code == 404
+    ids = {
+        listed["id"]
+        for listed in client.get("/documents", headers=auth(world, "admin_b")).json()
+    }
     assert doc["id"] not in ids
-    assert client.get(f"/documents/{doc['id']}", headers=h2).status_code == 404
-    assert client.get(f"/sources/{doc['id']}", headers=h2).status_code == 404
 
 
-def test_read_only_key_cannot_write(client, scoped_keys):
-    """write=false keys get 403 on every mutating endpoint."""
-    h = {"X-API-Key": "reader-key"}
-    r = client.post(
-        "/documents", files={"file": ("x.txt", b"hi")}, headers=h
+def test_restricted_grant_lifecycle(client, world):
+    """restricted: deny without grant -> allow with grant -> deny after
+    revoke (immediately, no caching)."""
+    doc = _upload(
+        client,
+        tenant_id=world["tenant_a"],
+        classification="restricted",
     )
-    assert r.status_code == 403
-    assert client.post("/ingest", headers=h).status_code == 403
-    r = client.post(
-        "/graph/review",
-        json={"source": "A", "target": "B", "description": "x",
-              "verdict": "rejected"},
-        headers=h,
+    headers = auth(world, "student")
+    assert client.get(f"/documents/{doc['id']}", headers=headers).status_code == 404
+
+    grant = client.post(
+        f"/documents/{doc['id']}/grants",
+        json={"grantee_type": "user", "grantee_id": world["users"]["student"]},
     )
-    assert r.status_code == 403
-    # reads still work
-    assert client.get("/documents", headers=h).status_code == 200
+    assert grant.status_code == 201, grant.text
+    assert client.get(f"/documents/{doc['id']}", headers=headers).status_code == 200
+    assert client.get(f"/sources/{doc['id']}", headers=headers).status_code == 200
+
+    response = client.delete(f"/documents/{doc['id']}/grants/{grant.json()['id']}")
+    assert response.status_code == 204
+    assert client.get(f"/documents/{doc['id']}", headers=headers).status_code == 404
 
 
-def test_unknown_key_still_401(client, scoped_keys):
-    """Scoped keys don't open the door to arbitrary keys."""
-    r = client.get("/documents", headers={"X-API-Key": "bogus"})
-    assert r.status_code == 401
+def test_grant_cannot_cross_tenant(client, world):
+    """A grant naming a user from another tenant is rejected at write."""
+    doc = _upload(
+        client, tenant_id=world["tenant_a"], classification="restricted"
+    )
+    response = client.post(
+        f"/documents/{doc['id']}/grants",
+        json={
+            "grantee_type": "user",
+            "grantee_id": world["users"]["admin_b"],
+        },
+    )
+    assert response.status_code == 400
 
 
-def test_admin_key_unrestricted(client, scoped_keys):
-    """The API_KEY admin sees all groups and can write."""
-    doc = _upload(client, group="library")
-    ids = {d["id"] for d in client.get("/documents").json()}
-    assert doc["id"] in ids
+def test_empty_scope_fails_closed(client, world):
+    """A doc nobody-but-owner may see produces an empty scope for
+    others — listing, detail, and retrieval all deny."""
+    doc = _upload(
+        client, tenant_id=world["tenant_a"], classification="restricted"
+    )
+    headers = auth(world, "guest")
+    ids = {
+        listed["id"]
+        for listed in client.get("/documents", headers=headers).json()
+    }
+    assert doc["id"] not in ids
+    # guests also can't reach internal docs at all
+    assert client.get(f"/documents/{doc['id']}", headers=headers).status_code == 404
+    response = client.post(
+        "/chat", json={"question": "tell me everything"}, headers=headers
+    )
+    assert response.status_code == 200
+    assert all(
+        citation.get("document_id") != doc["id"]
+        for citation in response.json()["citations"]
+    )
+
+
+# --- privilege escalation ----------------------------------------------------
+
+
+def test_student_cannot_self_promote(client, world):
+    """PATCH /users/{self} with a role change is rejected — and students
+    can't reach the admin endpoint at all."""
+    uid = world["users"]["student"]
+    response = client.patch(
+        f"/users/{uid}",
+        json={"role": "faculty"},
+        headers=auth(world, "student"),
+    )
+    assert response.status_code == 403
+
+
+def test_admin_cannot_self_change_role(client, world):
+    """Even an admin cannot change their own role/status."""
+    uid = world["users"]["admin_a"]
+    response = client.patch(
+        f"/users/{uid}",
+        json={"role": "platform_admin"},
+        headers=auth(world, "admin_a"),
+    )
+    assert response.status_code == 403
+
+
+def test_uni_admin_role_ceiling(client, world):
+    """A university admin cannot create or assign platform_admin, and
+    cannot act outside its tenant."""
+    response = client.post(
+        "/users",
+        json={"email": "x@a.edu", "role": "platform_admin"},
+        headers=auth(world, "admin_a"),
+    )
+    assert response.status_code == 403
+    # role demotion of a platform admin by a tenant admin is also out
+    response = client.post(
+        "/users",
+        json={
+            "email": "sneaky@a.edu",
+            "role": "student",
+            "tenant_id": world["tenant_b"],
+        },
+        headers=auth(world, "admin_a"),
+    )
+    assert response.status_code in (201, 409)  # tenant_id is forced to own tenant
+    if response.status_code == 201:
+        assert response.json()["tenant_id"] == world["tenant_a"]
+
+
+def test_student_cannot_enroll_self(client, world):
+    """Enrollment writes require hod-or-above — students get 403."""
+    response = client.post(
+        "/enrollments",
+        json={
+            "user_id": world["users"]["student"],
+            "course_id": world["course_501"],
+            "kind": "student",
+        },
+        headers=auth(world, "student"),
+    )
+    assert response.status_code == 403
+
+
+# --- API key lifecycle --------------------------------------------------------
+
+
+def test_key_rotation_revokes_old_key(client, world):
+    """Rotating a key invalidates the old one immediately."""
+    headers = auth(world, "guest")
+    assert client.get("/documents", headers=headers).status_code == 200
+    response = client.post(
+        f"/users/{world['users']['guest']}/rotate-key", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    new_key = response.json()["api_key"]
+    assert new_key and new_key != world["keys"]["guest"]
+    assert client.get("/documents", headers=headers).status_code == 401
+    assert (
+        client.get("/documents", headers={"X-API-Key": new_key}).status_code
+        == 200
+    )
+    world["keys"]["guest"] = new_key  # keep the fixture consistent
+
+
+def test_deactivated_user_key_fails(client, world):
+    """is_active=false immediately revokes the user's key."""
+    uid = world["users"]["faculty"]
+    headers = auth(world, "faculty")
+    assert client.get("/documents", headers=headers).status_code == 200
+    response = client.patch(
+        f"/users/{uid}",
+        json={"is_active": False},
+        headers=auth(world, "admin_a"),
+    )
+    assert response.status_code == 200
+    assert client.get("/documents", headers=headers).status_code == 401
+    client.patch(  # restore for other tests
+        f"/users/{uid}",
+        json={"is_active": True},
+        headers=auth(world, "admin_a"),
+    )
+
+
+def test_wrong_and_missing_keys_still_401(client, world):
+    """Unknown keys and missing keys stay 401 with user keys in play."""
+    assert client.get(
+        "/documents", headers={"X-API-Key": "bogus"}
+    ).status_code == 401
+    assert client.get("/documents", headers={"X-API-Key": ""}).status_code == 401
+
+
+# --- scoped rerouting / chat ---------------------------------------------------
+
+
+def test_scoped_caller_rerouted_off_local(client, world):
+    """mode=local for a scoped user reroutes and reports the
+    substitution; the answer must not use the unrestricted composer."""
+    _upload(
+        client,
+        b"Dr. Priya Raman teaches CS-501 in Turing Hall.",
+        tenant_id=world["tenant_a"],
+        classification="public",
+    )
+    response = client.post(
+        "/chat",
+        json={"question": "who teaches CS-501?", "mode": "local"},
+        headers=auth(world, "student"),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["route"] != "local"
+    assert data["requested_route"] == "local"
+
+
+def test_chat_excludes_out_of_scope_context(client, world):
+    """Hybrid retrieval only sees in-scope docs: a tenant-A doc never
+    reaches tenant-B's context or citations."""
+    doc = _upload(
+        client,
+        b"Turing Hall hosts the Data Systems Lab.",
+        tenant_id=world["tenant_a"],
+        classification="public",
+    )
+    response = client.post(
+        "/chat",
+        json={"question": "what is in Turing Hall?"},
+        headers=auth(world, "admin_b"),
+    )
+    assert response.status_code == 200
+    assert all(
+        citation.get("document_id") != doc["id"]
+        for citation in response.json()["citations"]
+    )
 
 
 def test_chat_response_shape(client):
     """Chat answers carry warning + metrics-capable fields."""
-    _upload(client, b"The registrar's office is in Turing Hall.",
-            group="default")
-    r = client.post(
+    _upload(client, b"The registrar's office is in Turing Hall.")
+    response = client.post(
         "/chat", json={"question": "where is the registrar's office?"}
     )
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert "warning" in data
-    assert "citations" in data
-    for c in data["citations"]:
-        assert "supported" in c
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "warning" in data and "requested_route" in data
+    for citation in data["citations"]:
+        assert "supported" in citation
+
+
+# --- graph artifact scoping (unit) ---------------------------------------------
+
+
+def test_scope_artifacts_strict_provenance():
+    """Entities/relationships/communities survive only when their full
+    provenance is authorized — mixed-evidence aggregates are dropped."""
+    import pandas as pd
+
+    from app.retrieval.artifacts import GraphArtifacts, scope_artifacts
+
+    docs = pd.DataFrame(
+        [
+            {"id": "gA", "title": "doc-a.txt"},
+            {"id": "gB", "title": "doc-b.txt"},
+        ]
+    )
+    tus = pd.DataFrame(
+        [
+            {"id": "tu1", "document_id": "gA", "text": "a"},
+            {"id": "tu2", "document_id": "gB", "text": "b"},
+        ]
+    )
+    ents = pd.DataFrame(
+        [
+            {"id": "e1", "title": "A", "text_unit_ids": ["tu1"]},
+            {"id": "e2", "title": "MIX", "text_unit_ids": ["tu1", "tu2"]},
+        ]
+    )
+    rels = pd.DataFrame(
+        [
+            {
+                "id": "r1",
+                "source": "A",
+                "target": "A2",
+                "text_unit_ids": ["tu1"],
+                "description": "x",
+                "weight": 1.0,
+            },
+            {
+                "id": "r2",
+                "source": "B",
+                "target": "C",
+                "text_unit_ids": ["tu1", "tu2"],
+                "description": "y",
+                "weight": 1.0,
+            },
+        ]
+    )
+    comms = pd.DataFrame(
+        [
+            {
+                "id": "c0",
+                "community": "0",
+                "level": "0",
+                "entity_ids": ["e1", "e2"],
+                "relationship_ids": ["r1"],
+                "text_unit_ids": ["tu1", "tu2"],
+            },
+            {
+                "id": "c1",
+                "community": "1",
+                "level": "0",
+                "entity_ids": ["e1"],
+                "relationship_ids": ["r1"],
+                "text_unit_ids": ["tu1"],
+            },
+        ]
+    )
+    reports = pd.DataFrame(
+        [
+            {"id": "rep0", "community": "0", "level": "0"},
+            {"id": "rep1", "community": "1", "level": "0"},
+        ]
+    )
+    arts = GraphArtifacts(
+        entities=ents,
+        relationships=rels,
+        text_units=tus,
+        communities=comms,
+        community_reports=reports,
+        documents=docs,
+    )
+    scoped = scope_artifacts(arts, {"doc-a"})
+    assert set(scoped.entities["id"]) == {"e1"}  # mixed-provenance e2 dropped
+    assert set(scoped.relationships["id"]) == {"r1"}
+    # community 0 contains unauthorized e2 -> dropped with its report
+    assert set(scoped.communities["community"].astype(str)) == {"1"}
+    assert set(scoped.community_reports["community"].astype(str)) == {"1"}
+    assert set(scoped.text_units["id"]) == {"tu1"}
+
+    empty = scope_artifacts(arts, set())
+    assert empty.entities.empty and empty.text_units.empty
+
+
+def test_stale_doc_ids_detects_deleted():
+    """Docs present in the index but gone from the DB are stale."""
+    import pandas as pd
+
+    from app.retrieval.artifacts import GraphArtifacts, stale_doc_ids
+
+    docs = pd.DataFrame(
+        [
+            {"id": "gA", "title": "doc-a.txt"},
+            {"id": "gB", "title": "doc-b.txt"},
+        ]
+    )
+    arts = GraphArtifacts(documents=docs)
+    assert stale_doc_ids(arts, {"doc-a"}) == {"doc-b"}
+    assert stale_doc_ids(arts, {"doc-a", "doc-b"}) == set()
 
 
 def test_validate_parses_verdicts():
@@ -163,7 +505,6 @@ def test_traverse_allowed_doc_ids():
         "CS-501", arts, emb, max_hops=1, max_items=5,
         allowed_doc_ids={"other-doc"},
     )
-    assert all(c.document_id == "other-doc" for c in got)
     assert got == []
 
 

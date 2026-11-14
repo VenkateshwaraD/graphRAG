@@ -1,9 +1,10 @@
 from collections.abc import Generator
+from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.config import get_settings
+from app.config import ROOT, get_settings
 
 settings = get_settings()
 
@@ -37,46 +38,62 @@ def _fk_on(dbapi_conn, _record):
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def init_db() -> None:
-    """Create all ORM tables and add any missing columns.
-
-    ``create_all`` covers new tables; the column sync below upgrades
-    existing databases (e.g. adding ``documents.doc_group`` or
-    ``messages.metrics``) without a full migration framework — new ORM
-    columns are nullable/defaulted by convention, so ``ALTER TABLE
-    ADD COLUMN`` is always safe.
+def _sqlite_path() -> Path | None:
+    """Filesystem path of the sqlite database, or None for other backends.
 
     Author: venkateshwara doijode
     """
-    from sqlalchemy import inspect, text
+    url = settings.database_url
+    prefix = "sqlite:///"
+    if url.startswith(prefix) and not url.endswith(":memory:"):
+        return Path(url[len(prefix):])
+    return None
 
-    from app.db.models import Base
 
-    Base.metadata.create_all(engine)
-    with engine.begin() as conn:
-        existing = {
-            t: {c["name"] for c in inspect(conn).get_columns(t)}
-            for t in Base.metadata.tables
-        }
-        for table in Base.metadata.tables.values():
-            for col in table.columns:
-                if col.name not in existing.get(table.name, ()):
-                    ddl = str(
-                        col.type.compile(dialect=engine.dialect)
-                    )
-                    stmt = f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl}'
-                    conn.execute(text(stmt))
-                    # Python-side defaults don't apply to existing rows —
-                    # backfill simple scalar defaults so filters treat
-                    # legacy rows as the default value.
-                    if col.default is not None and col.default.is_scalar:
-                        conn.execute(
-                            text(
-                                f"UPDATE {table.name} SET {col.name} = :v "
-                                f"WHERE {col.name} IS NULL"
-                            ),
-                            {"v": col.default.arg},
-                        )
+def _backup_sqlite() -> Path | None:
+    """Snapshot the sqlite file before migrations run so a failed
+    upgrade can be restored manually (``app.db.bak-<timestamp>``).
+
+    Author: venkateshwara doijode
+    """
+    import shutil
+    import time
+
+    path = _sqlite_path()
+    if path is None or not path.exists():
+        return None
+    bak = path.with_name(f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(path, bak)
+    return bak
+
+
+def migrate_db() -> None:
+    """Run ``alembic upgrade head`` against the configured database.
+
+    Alembic is the sole schema path — on SQLite a file backup is taken
+    first and any migration failure propagates so startup aborts rather
+    than running against a half-migrated schema.
+
+    Author: venkateshwara doijode
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    _backup_sqlite()
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    command.upgrade(cfg, "head")
+
+
+def init_db() -> None:
+    """Startup schema hook: run pending Alembic migrations.
+
+    Kept under the historical name so ``app.main`` and tests don't
+    change; the implementation is Alembic, not ``create_all``.
+
+    Author: venkateshwara doijode
+    """
+    migrate_db()
 
 
 def get_session() -> Generator[Session, None, None]:
